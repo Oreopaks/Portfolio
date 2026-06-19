@@ -1,0 +1,211 @@
+{
+  "name": "MVP2 — AI Lead Automation",
+  "nodes": [
+    {
+      "id": "1f0a1b2c-0001-4a01-9001-000000000001",
+      "name": "Webhook (incoming lead)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "webhookId": "mvp2-incoming-lead",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lead",
+        "responseMode": "lastNode",
+        "options": {}
+      }
+    },
+    {
+      "id": "1f0a1b2c-0002-4a01-9001-000000000002",
+      "name": "Score & Qualify (rules)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 300],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// Зеркалит rule-based логику reference.py (score_lead / categorize / routes)\nconst URGENCY = ['срочно','сегодня','asap','немедленно','сейчас'];\nconst ROUTES = { hot: 'sales_call', warm: 'email_nurture', cold: 'newsletter' };\n\nfunction scoreLead(lead) {\n  let score = 0;\n  let budget = parseFloat(lead.budget) || 0;\n  if (budget >= 50000) score += 50;\n  else if (budget >= 10000) score += 25;\n\n  const text = [lead.name, lead.message, lead.subject].filter(Boolean).join(' ').toLowerCase();\n  if (URGENCY.some(kw => text.includes(kw))) score += 30;\n\n  if (String(lead.phone || '').trim()) score += 10;\n  if (String(lead.email || '').trim()) score += 10;\n\n  return Math.min(score, 100);\n}\n\nfunction categorize(score) {\n  if (score >= 70) return 'hot';\n  if (score >= 40) return 'warm';\n  return 'cold';\n}\n\nconst lead = $input.first().json.body || $input.first().json;\nconst score = scoreLead(lead);\nconst category = categorize(score);\nconst routed_to = ROUTES[category];\nconst summary = `Имя: ${lead.name || '—'}. Бюджет: ${lead.budget || '—'}. Контакты: ${lead.phone || '—'} / ${lead.email || '—'}. Сообщение: ${lead.message || '—'}`;\n\nreturn [{ json: { lead, score, category, routed_to, summary } }];"
+      }
+    },
+    {
+      "id": "1f0a1b2c-0003-4a01-9001-000000000003",
+      "name": "GigaChat note (HTTP)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [720, 300],
+      "parameters": {
+        "method": "POST",
+        "url": "https://gigachat.devices.sberbank.ru/api/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"GigaChat\",\n  \"temperature\": 0.3,\n  \"messages\": [\n    { \"role\": \"system\", \"content\": \"Ты ассистент отдела продаж. По краткой сводке лида напиши одно короткое предложение: как связаться и что предложить.\" },\n    { \"role\": \"user\", \"content\": \"{{ $json.summary }}\" }\n  ]\n}",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_GIGACHAT_CRED_ID",
+          "name": "GigaChat Bearer (header auth)"
+        }
+      }
+    },
+    {
+      "id": "1f0a1b2c-0004-4a01-9001-000000000004",
+      "name": "Merge note into item",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [960, 300],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a-note",
+              "name": "note",
+              "type": "string",
+              "value": "={{ $json.choices?.[0]?.message?.content || 'нет заметки' }}"
+            },
+            {
+              "id": "a-lead",
+              "name": "lead",
+              "type": "object",
+              "value": "={{ $('Score & Qualify (rules)').item.json.lead }}"
+            },
+            {
+              "id": "a-score",
+              "name": "score",
+              "type": "number",
+              "value": "={{ $('Score & Qualify (rules)').item.json.score }}"
+            },
+            {
+              "id": "a-category",
+              "name": "category",
+              "type": "string",
+              "value": "={{ $('Score & Qualify (rules)').item.json.category }}"
+            },
+            {
+              "id": "a-routed",
+              "name": "routed_to",
+              "type": "string",
+              "value": "={{ $('Score & Qualify (rules)').item.json.routed_to }}"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "1f0a1b2c-0005-4a01-9001-000000000005",
+      "name": "IF hot lead?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1200, 300],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "typeValidation": "strict" },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "c-hot",
+              "leftValue": "={{ $json.category }}",
+              "rightValue": "hot",
+              "operator": { "type": "string", "operation": "equals" }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "1f0a1b2c-0006-4a01-9001-000000000006",
+      "name": "Telegram notify (hot)",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [1460, 200],
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{ $env.SALES_TELEGRAM_CHAT_ID }}",
+        "text": "=🔥 ГОРЯЧИЙ ЛИД ({{ $json.score }})\nИмя: {{ $json.lead.name }}\nТелефон: {{ $json.lead.phone }}\nМаршрут: {{ $json.routed_to }}\nЗаметка: {{ $json.note }}",
+        "additionalFields": {}
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_WITH_TELEGRAM_CRED_ID",
+          "name": "Telegram Sales Bot"
+        }
+      }
+    },
+    {
+      "id": "1f0a1b2c-0007-4a01-9001-000000000007",
+      "name": "Append to CRM Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [1460, 400],
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "REPLACE_WITH_GOOGLE_SHEET_ID"
+        },
+        "sheet": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Leads"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "name": "={{ $json.lead.name }}",
+            "phone": "={{ $json.lead.phone }}",
+            "email": "={{ $json.lead.email }}",
+            "budget": "={{ $json.lead.budget }}",
+            "score": "={{ $json.score }}",
+            "category": "={{ $json.category }}",
+            "routed_to": "={{ $json.routed_to }}",
+            "note": "={{ $json.note }}"
+          }
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_WITH_GOOGLE_SHEETS_CRED_ID",
+          "name": "Google Sheets account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Webhook (incoming lead)": {
+      "main": [[{ "node": "Score & Qualify (rules)", "type": "main", "index": 0 }]]
+    },
+    "Score & Qualify (rules)": {
+      "main": [[{ "node": "GigaChat note (HTTP)", "type": "main", "index": 0 }]]
+    },
+    "GigaChat note (HTTP)": {
+      "main": [[{ "node": "Merge note into item", "type": "main", "index": 0 }]]
+    },
+    "Merge note into item": {
+      "main": [[{ "node": "IF hot lead?", "type": "main", "index": 0 }]]
+    },
+    "IF hot lead?": {
+      "main": [
+        [{ "node": "Telegram notify (hot)", "type": "main", "index": 0 }],
+        [{ "node": "Append to CRM Sheet", "type": "main", "index": 0 }]
+      ]
+    },
+    "Telegram notify (hot)": {
+      "main": [[{ "node": "Append to CRM Sheet", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "active": false,
+  "pinData": {}
+}

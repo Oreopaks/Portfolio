@@ -1,0 +1,49 @@
+name: Order Scout
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"   # каждые 30 минут
+  workflow_dispatch: {}
+
+# Разрешаем коммитить обновлённый seen.json обратно в репозиторий.
+permissions:
+  contents: write
+
+jobs:
+  scout:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run scout
+        env:
+          LLM_PROVIDER: ${{ secrets.LLM_PROVIDER }}
+          GIGACHAT_AUTH_KEY: ${{ secrets.GIGACHAT_AUTH_KEY }}
+          SCOUT_NOTIFY_TOKEN: ${{ secrets.SCOUT_NOTIFY_TOKEN }}
+          SCOUT_NOTIFY_CHAT_ID: ${{ secrets.SCOUT_NOTIFY_CHAT_ID }}
+          SCOUT_KEYWORDS: ${{ secrets.SCOUT_KEYWORDS }}
+          SCOUT_MIN_BUDGET: ${{ secrets.SCOUT_MIN_BUDGET }}
+          SCOUT_TG_CHANNELS: ${{ secrets.SCOUT_TG_CHANNELS }}
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          TG_SESSION: ${{ secrets.TG_SESSION }}
+        run: python mvp4_scout/scout.py
+
+      - name: Persist seen.json
+        run: |
+          if [ -n "$(git status --porcelain mvp4_scout/seen.json)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add mvp4_scout/seen.json
+            git commit -m "scout: update seen.json [skip ci]"
+            git push
+          fi
