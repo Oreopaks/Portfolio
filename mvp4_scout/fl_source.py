@@ -16,11 +16,17 @@ fetch_fl_orders(...) — боевая: ходит в сеть через request
 from __future__ import annotations
 import re
 import urllib.parse
+import xml.etree.ElementTree as ET
 
 try:
     import requests
 except ImportError:  # офлайн-тест с parse_orders сети не требует
     requests = None
+
+# Официальный RSS-фид FL.ru: чистый список свежих проектов с категорией,
+# описанием и бюджетом. Работает без авторизации (в отличие от ?keyword=,
+# который для гостя игнорируется и отдаёт общую ленту).
+RSS_URL = "https://www.fl.ru/rss/all.xml"
 
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -33,6 +39,19 @@ _TITLE_RE = re.compile(
 )
 # Число (с &nbsp; и пробелами) непосредственно перед маркером валюты fl-rub
 _NUM_BEFORE_RUB = re.compile(r'((?:\d|&nbsp;|\s){1,24})<span class="fl-rub"')
+_TAG_RE = re.compile(r"<[^>]+>")
+_ENTITIES = {
+    "&nbsp;": " ", "&laquo;": "«", "&raquo;": "»", "&mdash;": "—",
+    "&ndash;": "–", "&amp;": "&", "&quot;": '"', "&#39;": "'", "&hellip;": "…",
+}
+
+
+def _clean_text(s: str) -> str:
+    """HTML-фрагмент -> чистый текст (теги долой, сущности раскрыть, пробелы свернуть)."""
+    s = _TAG_RE.sub(" ", s)
+    for k, v in _ENTITIES.items():
+        s = s.replace(k, v)
+    return re.sub(r"\s+", " ", s).strip()
 
 
 def parse_orders(html: str) -> list[dict]:
@@ -57,14 +76,65 @@ def parse_orders(html: str) -> list[dict]:
             if digits:
                 budget = int(digits)
 
+        # Описание заказа: чистый текст тела карточки (для смысловой оценки).
+        desc = _clean_text(body)[:400]
+
         orders.append(
             {
                 "title": title,
                 "budget": budget,
                 "url": f"https://www.fl.ru/projects/{pid}/",
+                "desc": desc,
             }
         )
     return orders
+
+
+_RSS_BUDGET_RE = re.compile(r"\(Бюджет:\s*([\d\s ]+)")
+
+
+def parse_rss(xml_bytes: bytes) -> list[dict]:
+    """RSS FL.ru -> [{"title","budget"(int|None),"url","desc","category"}]. Без сети.
+
+    Заголовок в RSS вида: «НАЗВАНИЕ (Бюджет: 15 000  ₽, для всех)».
+    Бюджет вытаскиваем из этого суффикса, сам суффикс из title убираем.
+    """
+    root = ET.fromstring(xml_bytes)
+    orders: list[dict] = []
+    for it in root.findall(".//item"):
+        def g(tag: str) -> str:
+            e = it.find(tag)
+            return (e.text or "").strip() if e is not None else ""
+
+        raw_title = g("title")
+        budget = None
+        m = _RSS_BUDGET_RE.search(raw_title)
+        if m:
+            digits = re.sub(r"\D", "", m.group(1))
+            if digits:
+                budget = int(digits)
+        title = re.sub(r"\s*\(Бюджет:.*$", "", raw_title).strip() or raw_title
+
+        orders.append(
+            {
+                "title": title,
+                "budget": budget,
+                "url": g("link"),
+                "desc": _clean_text(g("description"))[:500],
+                "category": g("category"),
+            }
+        )
+    return orders
+
+
+def fetch_fl_rss() -> list[dict]:
+    """Боевая: тянет RSS-фид FL.ru и парсит. Использует сеть."""
+    if requests is None:
+        raise RuntimeError("requests не установлен — fetch_fl_rss недоступен")
+    r = requests.get(RSS_URL, headers={"User-Agent": _UA}, timeout=30)
+    if r.status_code != 200:
+        raise RuntimeError(f"FL.ru RSS -> HTTP {r.status_code}")
+    return parse_rss(r.content)
 
 
 def fetch_fl_orders(keywords: list[str], pages: int = 1) -> list[dict]:

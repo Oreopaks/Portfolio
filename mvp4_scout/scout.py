@@ -24,9 +24,10 @@ try:
 except ImportError:
     requests = None
 
-from mvp4_scout.fl_source import fetch_fl_orders
+from mvp4_scout.fl_source import fetch_fl_rss, fetch_fl_orders
 from mvp4_scout.tg_source import fetch_tg_orders
 from mvp4_scout.draft import make_draft, PROFILE
+from mvp4_scout.relevance import score_orders
 
 SEEN_PATH = Path(__file__).resolve().parent / "seen.json"
 
@@ -34,6 +35,22 @@ SEEN_PATH = Path(__file__).resolve().parent / "seen.json"
 KEYWORDS = [k.strip() for k in os.environ.get("SCOUT_KEYWORDS", "бот,парсинг,автоматизация,GPT,Telegram").split(",") if k.strip()]
 MIN_BUDGET = int(os.environ.get("SCOUT_MIN_BUDGET", "10000"))
 TG_CHANNELS = [c.strip() for c in os.environ.get("SCOUT_TG_CHANNELS", "").split(",") if c.strip()]
+# Порог умной оценки релевантности (0-100): ниже — не шлём.
+SCORE_MIN = int(os.environ.get("SCOUT_SCORE_MIN", "70"))
+
+# Whitelist категорий FL.ru под демо (бот/AI/автоматизация/парсинг/данные/разработка).
+# Детерминированно отсекает видео/дизайн/инженерию/фото до дорогой LLM-оценки.
+_CAT_OK = re.compile(
+    r"бот|ai|искусственн|нейросет|gpt|чат|telegram|автоматизац|парс|скрейп|scrap"
+    r"|crm|интеграц|данн|data|python|api|скрипт|программир|разработк",
+    re.IGNORECASE,
+)
+
+
+def _category_ok(cat: str) -> bool:
+    """True, если категория пустая (источник без категории) или попадает в whitelist."""
+    cat = (cat or "").strip()
+    return not cat or bool(_CAT_OK.search(cat))
 
 
 def _kw_hit(title: str, kws: list[str]) -> bool:
@@ -120,11 +137,11 @@ def run_cycle() -> int:
     """Полный цикл скаута. Возвращает число новых уведомлений."""
     orders: list[dict] = []
 
-    # FL.ru
+    # FL.ru — основной источник через RSS-фид (чистый, с категорией и описанием)
     try:
-        orders.extend(fetch_fl_orders(KEYWORDS, pages=1))
+        orders.extend(fetch_fl_rss())
     except Exception as e:
-        print(f"[scout] FL.ru недоступен: {e}")
+        print(f"[scout] FL.ru RSS недоступен: {e}")
 
     # Telegram (только если заданы каналы; иначе пропустит само)
     if TG_CHANNELS:
@@ -133,10 +150,26 @@ def run_cycle() -> int:
         except Exception as e:
             print(f"[scout] Telegram недоступен: {e}")
 
-    print(f"[scout] собрано заказов: {len(orders)}")
+    # дедуп по url/заголовку
+    uniq: list[dict] = []
+    seen_keys: set[str] = set()
+    for o in orders:
+        k = o.get("url") or o.get("title")
+        if k and k not in seen_keys:
+            seen_keys.add(k)
+            uniq.append(o)
 
-    relevant = filter_orders(orders, MIN_BUDGET, KEYWORDS)
-    print(f"[scout] после фильтра: {len(relevant)}")
+    # whitelist категорий: отсекаем явно не-IT (видео/дизайн/инженерия) до LLM
+    in_cat = [o for o in uniq if _category_ok(o.get("category", ""))]
+
+    # бюджет-префильтр: режем числовые ниже порога (None оставляем — решит оценщик)
+    pre = [o for o in in_cat if o.get("budget") is None or o["budget"] >= MIN_BUDGET]
+    print(f"[scout] собрано {len(orders)} -> уник {len(uniq)} -> по категории {len(in_cat)} -> по бюджету {len(pre)}")
+
+    # умная LLM-оценка релевантности под готовые продукты
+    scored = score_orders(pre, PROFILE)
+    relevant = [o for o in scored if o.get("fit", 0) >= SCORE_MIN]
+    print(f"[scout] релевантных (fit>={SCORE_MIN}): {len(relevant)}")
 
     seen = _load_seen()
     new = [o for o in relevant if (o.get("url") or o.get("title")) not in seen]
@@ -144,17 +177,20 @@ def run_cycle() -> int:
 
     sent = 0
     for o in new:
+        demo = o.get("demo", -1)
         try:
-            draft = make_draft(o, PROFILE)
+            draft = make_draft(o, PROFILE, focus=demo)
         except Exception as e:
             draft = f"(не удалось сгенерировать отклик: {e})"
         budget = o.get("budget")
         budget_str = f"{budget} руб" if budget else "по договорённости"
+        demo_name = PROFILE["projects"][demo]["name"] if 0 <= demo < len(PROFILE["projects"]) else "—"
         text = (
-            f"🆕 Новый заказ\n"
+            f"🆕 Заказ под «{demo_name}» (релевантность {o.get('fit')}%)\n"
             f"{o.get('title')}\n"
             f"Бюджет: {budget_str}\n"
-            f"{o.get('url')}\n\n"
+            f"{o.get('url')}\n"
+            f"💡 {o.get('why', '')}\n\n"
             f"✍️ Черновик отклика:\n{draft}"
         )
         notify(text)
