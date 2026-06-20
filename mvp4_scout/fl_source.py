@@ -18,6 +18,8 @@ import re
 import urllib.parse
 import xml.etree.ElementTree as ET
 
+from mvp4_scout.rank import parse_age_hours
+
 try:
     import requests
 except ImportError:  # офлайн-тест с parse_orders сети не требует
@@ -135,6 +137,97 @@ def fetch_fl_rss() -> list[dict]:
     if r.status_code != 200:
         raise RuntimeError(f"FL.ru RSS -> HTTP {r.status_code}")
     return parse_rss(r.content)
+
+
+# ---------------------------------------------------------------------------
+# Страница списка проектов fl.ru/projects/ — БОГАЧЕ RSS: в каждой карточке
+# отрисованы число откликов, возраст заказа и просмотры. Это и есть сигналы
+# «стоит ли откликаться» (конкуренция + свежесть), которых нет ни в RSS, ни
+# на странице самого заказа (там счётчик откликов догружается через JS).
+# ---------------------------------------------------------------------------
+LISTING_URL = "https://www.fl.ru/projects/"
+
+# Заголовок-якорь карточки: name="prj<id>" + href на .html (как в parse_orders).
+_CARD_RE = re.compile(
+    r'name="prj(\d+)"\s+href="(/projects/\d+/[^"]+\.html)"[^>]*>([^<]{3,200})</a>'
+)
+_BUDGET_RUB_RE = re.compile(r"(\d[\d\s ]{1,12})\s*руб")
+# Иконка #message-empty -> рядом «N ответов» (счётчик откликов карточки).
+_RESP_RE = re.compile(r"#message-empty.{0,400}?(\d+)\s*ответ", re.S)
+# Иконка #eye-open -> следующий <span> с числом просмотров («больше 300» / «42»).
+_VIEWS_RE = re.compile(r"#eye-open.{0,400}?<span[^>]*>\s*(больше\s*\d+|\d+)", re.S)
+# «Заказ 19 часов 37 минут назад» — возраст заказа.
+_AGE_RE = re.compile(r"Заказ\s+(.+?)\s+назад", re.S)
+
+
+def _parse_views(s: str) -> int | None:
+    m = re.search(r"\d+", s or "")
+    return int(m.group(0)) if m else None
+
+
+def parse_listing(html: str) -> list[dict]:
+    """HTML страницы списка fl.ru/projects/ -> заказы с деловыми сигналами. Без сети.
+
+    Поля: title, budget(int|None), url, desc, responses(int|None),
+    age_hours(float|None), views(int|None).
+    """
+    if not html:
+        return []
+    cards = list(_CARD_RE.finditer(html))
+    out: list[dict] = []
+    for idx, m in enumerate(cards):
+        pid, href, title = m.group(1), m.group(2), re.sub(r"\s+", " ", m.group(3)).strip()
+        start = m.start()
+        end = cards[idx + 1].start() if idx + 1 < len(cards) else min(len(html), start + 4000)
+        raw = html[start:end]
+        text = _clean_text(raw)
+
+        budget = None
+        bm = _BUDGET_RUB_RE.search(text)
+        if bm:
+            digits = re.sub(r"\D", "", bm.group(1))
+            if digits:
+                budget = int(digits)
+
+        rm = _RESP_RE.search(raw)
+        responses = int(rm.group(1)) if rm else None
+
+        vm = _VIEWS_RE.search(raw)
+        views = _parse_views(vm.group(1)) if vm else None
+
+        am = _AGE_RE.search(text)
+        age_hours = parse_age_hours(am.group(1)) if am else None
+
+        out.append(
+            {
+                "title": title,
+                "budget": budget,
+                "url": f"https://www.fl.ru{href}",
+                "desc": text[:400],
+                "responses": responses,
+                "age_hours": age_hours,
+                "views": views,
+            }
+        )
+    return out
+
+
+def fetch_fl_listing(pages: int = 3) -> list[dict]:
+    """Боевая: тянет N страниц списка проектов FL.ru и парсит. Использует сеть."""
+    if requests is None:
+        raise RuntimeError("requests не установлен — fetch_fl_listing недоступен")
+    out: list[dict] = []
+    for page in range(1, max(1, pages) + 1):
+        url = LISTING_URL + (f"?page={page}" if page > 1 else "")
+        try:
+            r = requests.get(url, headers={"User-Agent": _UA, "Accept-Language": "ru"}, timeout=40)
+            if r.status_code != 200:
+                print(f"[fl] {url} -> HTTP {r.status_code}")
+                continue
+            out.extend(parse_listing(r.text))
+        except Exception as e:  # сеть может падать — не валим весь цикл
+            print(f"[fl] ошибка запроса {url}: {e}")
+    return out
 
 
 def fetch_fl_orders(keywords: list[str], pages: int = 1) -> list[dict]:

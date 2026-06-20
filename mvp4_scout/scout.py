@@ -24,10 +24,18 @@ try:
 except ImportError:
     requests = None
 
-from mvp4_scout.fl_source import fetch_fl_rss, fetch_fl_orders
+from mvp4_scout.fl_source import fetch_fl_rss, fetch_fl_listing
 from mvp4_scout.tg_source import fetch_tg_orders
 from mvp4_scout.draft import make_draft, PROFILE
 from mvp4_scout.relevance import score_orders
+from mvp4_scout.rank import (
+    prescore,
+    priority,
+    win_probability,
+    roi,
+    verdict,
+    keyword_strength,
+)
 
 SEEN_PATH = Path(__file__).resolve().parent / "seen.json"
 
@@ -35,24 +43,32 @@ SEEN_PATH = Path(__file__).resolve().parent / "seen.json"
 KEYWORDS = [k.strip() for k in os.environ.get("SCOUT_KEYWORDS", "бот,парсинг,автоматизация,GPT,Telegram").split(",") if k.strip()]
 MIN_BUDGET = int(os.environ.get("SCOUT_MIN_BUDGET", "10000"))
 TG_CHANNELS = [c.strip() for c in os.environ.get("SCOUT_TG_CHANNELS", "").split(",") if c.strip()]
-# Порог умной оценки релевантности (0-100): ниже — не шлём.
-# Мусор стабильно получает demo=-1 -> fit=0. 60 режет слабые «смежно» (натянутые
-# отклики), оставляя уверенные матчи под портфолио.
-SCORE_MIN = int(os.environ.get("SCOUT_SCORE_MIN", "60"))
+# Порог LLM-релевантности (0-100): ниже — не шлём. Мусор стабильно получает
+# demo=-1 -> fit=0. 60 режет слабые «смежно», оставляя уверенные матчи.
+FIT_MIN = int(os.environ.get("SCOUT_SCORE_MIN", "60"))
+# Объём парсинга: сколько страниц списка тянуть (~30 заказов на страницу).
+SCOUT_PAGES = int(os.environ.get("SCOUT_PAGES", "3"))
+# Cap на дорогую LLM-оценку: берём топ-K кандидатов по дешёвому pre-score.
+SCOUT_TOP_K = int(os.environ.get("SCOUT_TOP_K", "12"))
+# Жёсткий потолок откликов — режет только вакансий-спам (100+ откликов). Заказы
+# с умеренной конкуренцией НЕ выкидываем: их шанс уходит в win_prob/priority и
+# показывается в уведомлении — решает пользователь, а не молчаливый дроп.
+MAX_RESPONSES = int(os.environ.get("SCOUT_MAX_RESPONSES", "60"))
+# Сколько уведомлений слать за цикл (топ по приоритету) — чтобы не заспамить.
+MAX_NOTIFY = int(os.environ.get("SCOUT_MAX_NOTIFY", "10"))
 
-# Whitelist категорий FL.ru под демо (бот/AI/автоматизация/парсинг/данные/разработка).
-# Детерминированно отсекает видео/дизайн/инженерию/фото до дорогой LLM-оценки.
-_CAT_OK = re.compile(
-    r"бот|ai|искусственн|нейросет|gpt|чат|telegram|автоматизац|парс|скрейп|scrap"
-    r"|crm|интеграц|данн|data|python|api|скрипт|программир|разработк",
+# Чёрный список интентов, которые НЕ берём (пользователь: «такое не нужно»):
+# накрутка, OSINT/пробив людей, слежка, гэмблинг, обнал. Дешёвый детерминированный
+# отсев до LLM; LLM в relevance.py страхует тем же правилом.
+_BLACKLIST = re.compile(
+    r"накрут|голосован|цифровой\s+след|пробив|деанон|доксин|компромат|слежк"
+    r"|казино|беттинг|ставки\s+на\s+спорт|обнал|отмыв",
     re.IGNORECASE,
 )
 
 
-def _category_ok(cat: str) -> bool:
-    """True, если категория пустая (источник без категории) или попадает в whitelist."""
-    cat = (cat or "").strip()
-    return not cat or bool(_CAT_OK.search(cat))
+def _is_blacklisted(o: dict) -> bool:
+    return bool(_BLACKLIST.search(f"{o.get('title','')} {o.get('desc','')}"))
 
 
 def _kw_hit(title: str, kws: list[str]) -> bool:
@@ -135,15 +151,50 @@ def notify(text: str) -> None:
         print(f"[notify] ошибка отправки: {e}")
 
 
+def _fmt_int(n: int) -> str:
+    return f"{int(n):,}".replace(",", " ")
+
+
+def _fmt_age(h: float | None) -> str:
+    if h is None:
+        return "?"
+    if h < 1:
+        return f"{int(h * 60)} мин"
+    if h < 48:
+        return f"{int(h)} ч"
+    return f"{int(h / 24)} дн"
+
+
+def _dedup(orders: list[dict]) -> list[dict]:
+    """Дедуп по url/заголовку, сохраняя порядок."""
+    uniq: list[dict] = []
+    keys: set[str] = set()
+    for o in orders:
+        k = o.get("url") or o.get("title")
+        if k and k not in keys:
+            keys.add(k)
+            uniq.append(o)
+    return uniq
+
+
 def run_cycle() -> int:
     """Полный цикл скаута. Возвращает число новых уведомлений."""
     orders: list[dict] = []
 
-    # FL.ru — основной источник через RSS-фид (чистый, с категорией и описанием)
+    # Основной источник — страница списка fl.ru/projects/: в карточках есть число
+    # откликов, возраст и просмотры (сигналы «стоит ли откликаться»).
     try:
-        orders.extend(fetch_fl_rss())
+        orders.extend(fetch_fl_listing(SCOUT_PAGES))
     except Exception as e:
-        print(f"[scout] FL.ru RSS недоступен: {e}")
+        print(f"[scout] FL.ru listing недоступен: {e}")
+
+    # Фоллбэк на RSS, если список пуст (смена вёрстки/сеть) — без откликов/возраста.
+    if not orders:
+        try:
+            orders.extend(fetch_fl_rss())
+            print("[scout] листинг пуст — фоллбэк на RSS")
+        except Exception as e:
+            print(f"[scout] FL.ru RSS недоступен: {e}")
 
     # Telegram (только если заданы каналы; иначе пропустит само)
     if TG_CHANNELS:
@@ -152,47 +203,63 @@ def run_cycle() -> int:
         except Exception as e:
             print(f"[scout] Telegram недоступен: {e}")
 
-    # дедуп по url/заголовку
-    uniq: list[dict] = []
-    seen_keys: set[str] = set()
-    for o in orders:
-        k = o.get("url") or o.get("title")
-        if k and k not in seen_keys:
-            seen_keys.add(k)
-            uniq.append(o)
+    uniq = _dedup(orders)
 
-    # whitelist категорий: отсекаем явно не-IT (видео/дизайн/инженерия) до LLM
-    in_cat = [o for o in uniq if _category_ok(o.get("category", ""))]
+    # --- Дешёвые ДЕТЕРМИНИРОВАННЫЕ префильтры (без LLM) -----------------------
+    step = [o for o in uniq if not _is_blacklisted(o)]                      # «такое не нужно»
+    step = [o for o in step if o.get("budget") is None or o["budget"] >= MIN_BUDGET]
+    step = [o for o in step if keyword_strength(f"{o.get('title','')} {o.get('desc','')}", KEYWORDS) > 0]
+    step = [o for o in step if (o.get("responses") or 0) <= MAX_RESPONSES]  # не безнадёжно
 
-    # бюджет-префильтр: режем числовые ниже порога (None оставляем — решит оценщик)
-    pre = [o for o in in_cat if o.get("budget") is None or o["budget"] >= MIN_BUDGET]
-    print(f"[scout] собрано {len(orders)} -> уник {len(uniq)} -> по категории {len(in_cat)} -> по бюджету {len(pre)}")
-
-    # умная LLM-оценка релевантности под готовые продукты
-    scored = score_orders(pre, PROFILE)
-    relevant = [o for o in scored if o.get("fit", 0) >= SCORE_MIN]
-    print(f"[scout] релевантных (fit>={SCORE_MIN}): {len(relevant)}")
-
+    # Дедуп против уже отправленных ДО LLM (не жжём модель на старом).
     seen = _load_seen()
-    new = [o for o in relevant if (o.get("url") or o.get("title")) not in seen]
-    print(f"[scout] новых (не виденных ранее): {len(new)}")
+    step = [o for o in step if (o.get("url") or o.get("title")) not in seen]
+
+    # Pre-score -> топ-K под дорогую LLM (цена/время самого скаута).
+    for o in step:
+        o["pre"] = prescore(o, KEYWORDS)
+    step.sort(key=lambda o: o["pre"], reverse=True)
+    candidates = step[:SCOUT_TOP_K]
+    print(f"[scout] собрано {len(orders)} -> уник {len(uniq)} -> кандидатов {len(step)} -> в LLM {len(candidates)}")
+
+    # --- LLM: тема + область компетенции -------------------------------------
+    scored = score_orders(candidates, PROFILE)
+
+    # --- Деловые сигналы + итоговый приоритет + гейт -------------------------
+    final: list[dict] = []
+    for o in scored:
+        demo, fit = o.get("demo", -1), o.get("fit", 0)
+        o["win_prob"] = win_probability(o.get("responses"), o.get("age_hours"))
+        o["roi"] = roi(o.get("budget"), demo)
+        o["priority"] = priority(fit, o["win_prob"], o["roi"])
+        if demo >= 0 and fit >= FIT_MIN:
+            final.append(o)
+    final.sort(key=lambda o: o["priority"], reverse=True)
+    final = final[:MAX_NOTIFY]
+    print(f"[scout] прошли гейт (fit>={FIT_MIN}): {len(final)}")
 
     sent = 0
-    for o in new:
+    for o in final:
         demo = o.get("demo", -1)
         try:
             draft = make_draft(o, PROFILE, focus=demo)
         except Exception as e:
             draft = f"(не удалось сгенерировать отклик: {e})"
         budget = o.get("budget")
-        budget_str = f"{budget} руб" if budget else "по договорённости"
+        budget_str = f"{_fmt_int(budget)} ₽" if budget else "по договорённости"
+        rv = o.get("roi")
+        roi_str = f" (~{_fmt_int(rv)} ₽/день)" if rv else ""
+        resp = o.get("responses")
+        resp_str = str(resp) if resp is not None else "—"
         demo_name = PROFILE["projects"][demo]["name"] if 0 <= demo < len(PROFILE["projects"]) else "—"
         text = (
-            f"🆕 Заказ под «{demo_name}» (релевантность {o.get('fit')}%)\n"
+            f"🆕 «{demo_name}» · приоритет {int(o.get('priority', 0))}\n"
             f"{o.get('title')}\n"
-            f"Бюджет: {budget_str}\n"
-            f"{o.get('url')}\n"
-            f"💡 {o.get('why', '')}\n\n"
+            f"💰 Бюджет: {budget_str}{roi_str}\n"
+            f"📊 Откликов: {resp_str} · возраст {_fmt_age(o.get('age_hours'))} · шанс ~{int(o['win_prob'] * 100)}%\n"
+            f"{verdict(o)}\n"
+            f"🔗 {o.get('url')}\n"
+            f"💡 fit {o.get('fit')}% — {o.get('why', '')}\n\n"
             f"✍️ Черновик отклика:\n{draft}"
         )
         notify(text)
