@@ -14,6 +14,7 @@ import os
 import json
 import hashlib
 import time
+import uuid
 
 try:
     import requests
@@ -58,7 +59,7 @@ def _gigachat_token() -> str:
     if not auth:
         raise LLMError("GIGACHAT_AUTH_KEY не задан в .env")
     scope = os.environ.get("GIGACHAT_SCOPE", "GIGACHAT_API_PERS")
-    rquid = hashlib.md5(auth.encode()).hexdigest()
+    rquid = str(uuid.uuid4())  # Сбер требует RqUID в формате UUID (с дефисами), иначе 400
     r = requests.post(
         "https://ngw.devices.sberbank.ru:9443/api/v2/oauth",
         headers={

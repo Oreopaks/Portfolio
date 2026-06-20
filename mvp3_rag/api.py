@@ -10,6 +10,7 @@ PDF поддерживается, если установлен pypdf (не об
 """
 from __future__ import annotations
 
+import os
 import sys
 import io
 from pathlib import Path
@@ -216,5 +217,6 @@ def ask():
 
 
 if __name__ == "__main__":
-    print("RAG API -> http://0.0.0.0:8080  (LLM available:", available(), ")")
-    app.run(host="0.0.0.0", port=8080, debug=False)
+    _port = int(os.environ.get("RAG_PORT", "8080"))
+    print(f"RAG API -> http://0.0.0.0:{_port}  (LLM available:", available(), ")")
+    app.run(host="0.0.0.0", port=_port, debug=False)

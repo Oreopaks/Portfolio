@@ -35,8 +35,15 @@ def fetch_tg_orders(channels, limit: int = 30) -> list[dict]:
         print("[tg] TG_API_ID / TG_API_HASH не заданы — пропускаю Telegram-источник")
         return []
 
+    session_str = os.environ.get("TG_SESSION", "")
+    if not session_str:
+        # Без сохранённой сессии Telethon ушёл бы в интерактивный логин (запрос телефона).
+        # В CI/без сессии просто пропускаем — заказы берутся из FL.ru.
+        print("[tg] TG_SESSION пуст — пропускаю Telegram-источник (нужен gen_session.py)")
+        return []
+
     # StringSession в env, чтобы не таскать .session-файл в CI.
-    session = StringSession(os.environ.get("TG_SESSION", ""))
+    session = StringSession(session_str)
     orders: list[dict] = []
 
     with TelegramClient(session, int(api_id), api_hash) as client:
