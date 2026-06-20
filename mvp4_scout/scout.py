@@ -36,7 +36,9 @@ KEYWORDS = [k.strip() for k in os.environ.get("SCOUT_KEYWORDS", "бот,парс
 MIN_BUDGET = int(os.environ.get("SCOUT_MIN_BUDGET", "10000"))
 TG_CHANNELS = [c.strip() for c in os.environ.get("SCOUT_TG_CHANNELS", "").split(",") if c.strip()]
 # Порог умной оценки релевантности (0-100): ниже — не шлём.
-SCORE_MIN = int(os.environ.get("SCOUT_SCORE_MIN", "70"))
+# Мусор стабильно получает demo=-1 -> fit=0. 60 режет слабые «смежно» (натянутые
+# отклики), оставляя уверенные матчи под портфолио.
+SCORE_MIN = int(os.environ.get("SCOUT_SCORE_MIN", "60"))
 
 # Whitelist категорий FL.ru под демо (бот/AI/автоматизация/парсинг/данные/разработка).
 # Детерминированно отсекает видео/дизайн/инженерию/фото до дорогой LLM-оценки.

@@ -1,82 +1,99 @@
 """
-ДЕТЕРМИНИРОВАННАЯ оценка релевантности заказа под готовые продукты.
+Оценка релевантности заказа под ОБЛАСТИ компетенций фрилансера (LLM, по одному).
 
-Почему не LLM-оценка: GigaChat на батче нестабилен (один и тот же вход даёт
-то 3 матча, то 0) — поток получается рваный. Здесь — чистые правила:
-категория уже отфильтрована в scout, а тут считаем совпадения ключей каждого
-демо в заголовке+описании. Один вход -> один выход. LLM используется только
-для текста отклика (make_draft), не для решения «слать/не слать».
+Почему по одному, а не батчем: батч в GigaChat нестабилен (один вход -> то 3
+матча, то 0). Одиночный запрос при temperature=0 стабилен по главному решению —
+к какой области относится заказ (demo). Само число fit может колебаться ±15,
+поэтому ГЕЙТ строится на demo (мусор стабильно получает demo=-1), а fit идёт
+на ранжирование/показ.
 
-score_orders(orders, profile) -> те же заказы с полями:
-  fit  — 0..100 (по силе совпадения ключей),
-  demo — индекс самого близкого продукта (0..N-1) или -1,
-  why  — какие ключи сработали.
+Фрейм важен: спрашиваем не «тот же ли это продукт», а «заказ из той же ОБЛАСТИ,
+где у разработчика опыт» — иначе LLM рубит даже явные бот-заказы как «надо
+делать с нуля».
+
+score_orders(orders, profile) -> те же заказы с полями fit/demo/why,
+отсортированные по fit убыв. demo=-1 => fit принудительно 0 (в гейт не пройдёт).
 """
 from __future__ import annotations
-import re
+import sys
+import json
 
-# Ключи под каждый продукт. Индекс == индексу в PROFILE["projects"] (draft.py):
-#   0 GPT-бот, 1 n8n-автоматизация, 2 RAG, 3 Скаут/парсинг.
-DEMO_KEYWORDS = {
-    0: ["бот", "чат-бот", "чатбот", "gpt", "ассистент", "автоответ", "автоответчик",
-        "диалог", "нейросотрудник", "нейроассистент", "саппорт", "поддержк", "faq",
-        "telegram-бот", "телеграм-бот", "консультант", "запись клиент", "записи клиент"],
-    1: ["автоматизац", "автоматизировать", "n8n", "zapier", "make.com", "integromat",
-        "интеграц", "webhook", "вебхук", "crm", "amocrm", "битрикс", "bitrix",
-        "заявк", "лид", "воронк", "сценари", "пайплайн", "рассылк", "уведомлен"],
-    2: ["rag", "retrieval", "база знаний", "базе знаний", "документ", "pdf", "docx",
-        "регламент", "инструкци", "поиск по", "ответы по", "векторн", "эмбеддинг",
-        "knowledge base"],
-    3: ["парс", "парсер", "парсинг", "scrap", "скрейп", "скрапинг", "сбор данных",
-        "собрать данны", "собрать информаци", "мониторинг", "выгрузк", "спарсить",
-        "граббер", "crawler", "краулер", "агрегат"],
-}
+sys.path.insert(0, "/home/oleg/freelance-mvp")
+
+from shared.llm import chat
 
 
-def _hits(text: str, keywords: list[str]) -> list[str]:
-    """Какие ключи сработали. Однословные — по началу слова (чтобы «бот» не ловил
-    «работа»); фразы со пробелом/дефисом-словом — по подстроке."""
-    hit = []
-    words = re.findall(r"[a-zA-Zа-яёА-ЯЁ0-9]+", text.lower())
-    wordset_starts = words  # для проверки startswith
-    low = text.lower()
-    for kw in keywords:
-        if " " in kw or "." in kw:  # фраза — подстрокой
-            if kw in low:
-                hit.append(kw)
-        else:
-            if any(w.startswith(kw) for w in wordset_starts):
-                hit.append(kw)
-    return hit
+# Чёткие границы областей (индексы совпадают с PROFILE["projects"] в draft.py).
+# Примеры внутри каждой области критично важны для верного роутинга пограничных
+# заказов (напр. «найти инфо о человеке» -> 3 парсинг, а не 0 бот).
+AREA_GUIDE = (
+    "0 = GPT-боты / чат-боты: диалоговый бот общается с пользователями в Telegram или "
+    "на сайте — поддержка, ответы на вопросы, запись клиентов, автоответы, FAQ-бот.\n"
+    "1 = Автоматизация и интеграции: связать сервисы между собой, заявки с сайта -> CRM, "
+    "n8n/zapier/make, webhook, авто-уведомления и рассылки, авто-обработка заявок/данных.\n"
+    "2 = RAG / поиск-ответы по документам: вопросы-ответы по базе знаний, PDF, регламентам, "
+    "ИИ-ассистент по внутренним документам компании.\n"
+    "3 = Парсинг и сбор данных: спарсить сайты, собрать базу/контакты/цены/объявления, "
+    "мониторинг, агрегатор, OSINT — найти информацию о человеке/компании по открытым источникам."
+)
 
 
-def score_orders(orders: list[dict], profile: dict, max_items: int = 200) -> list[dict]:
-    """Детерминированно оценить заказы. Возвращает с полями fit/demo/why,
-    отсортированные по fit убыв."""
+def _score_one(order: dict, profile: dict) -> dict:
+    title = (order.get("title") or "").strip()
+    desc = (order.get("desc") or "").strip()[:280]
+    category = (order.get("category") or "").strip()
+
+    system = (
+        "Ты подбираешь заказы фрилансеру — Python/AI-разработчику. У него есть опыт и "
+        "готовые наработки в нескольких ОБЛАСТЯХ. Реши, относится ли заказ к одной из "
+        "них и к какой ИМЕННО (выбирай область по сути задачи заказчика, а не по словам). "
+        'Ответ — ТОЛЬКО JSON: {"fit":0-100,"demo":<индекс области или -1>,"why":"<кратко>"}. '
+        "fit>=70 — заказ явно в одной из областей; 40-69 — смежно; <=20 — не его. "
+        "Дизайн, видео/монтаж, тексты/копирайт, вёрстка, PHP/Laravel-бэкенд, мобильная "
+        "разработка с нуля, инженерия, фото = НЕ его области: fit<=20, demo=-1. "
+        "Выбирай demo строго по описанию ниже."
+    )
+    user = (
+        f"Области (индекс = область):\n{AREA_GUIDE}\n\n"
+        f"Заказ: «{title}»" + (f" [категория: {category}]" if category else "")
+        + (f"\nОписание: {desc}" if desc else "")
+    )
+    raw = chat(system, user, temperature=0.0)
+    s, e = raw.find("{"), raw.rfind("}")
+    obj = {}
+    if s != -1 and e > s:
+        try:
+            obj = json.loads(raw[s : e + 1])
+        except Exception:
+            obj = {}
+    return obj
+
+
+def score_orders(orders: list[dict], profile: dict, max_items: int = 40) -> list[dict]:
+    """LLM-оценка каждого заказа (с лимитом max_items). Поля fit/demo/why; demo=-1
+    => fit=0 (не пройдёт гейт). Отсортировано по fit убыв."""
     nprod = len(profile.get("projects", []))
     out: list[dict] = []
     for o in orders[:max_items]:
-        title = (o.get("title") or "")
-        desc = (o.get("desc") or "")
-        best_demo, best_fit, best_why = -1, 0, ""
-        for demo, kws in DEMO_KEYWORDS.items():
-            if demo >= nprod:
-                continue
-            th = _hits(title, kws)
-            dh = _hits(desc, kws)
-            uniq = set(th) | set(dh)
-            if not uniq:
-                continue
-            # релевантно, если ключ в ЗАГОЛОВКЕ, либо >=2 разных ключа в описании
-            if not th and len(uniq) < 2:
-                continue
-            fit = min(100, 55 + 25 * len(th) + 10 * (len(uniq) - len(set(th))))
-            if fit > best_fit:
-                best_demo, best_fit, best_why = demo, fit, ", ".join(sorted(uniq))
+        try:
+            obj = _score_one(o, profile)
+        except Exception as ex:
+            print(f"[relevance] ошибка оценки: {ex}")
+            obj = {}
+        try:
+            demo = int(obj.get("demo", -1))
+        except Exception:
+            demo = -1
+        try:
+            fit = max(0, min(100, int(obj.get("fit", 0))))
+        except Exception:
+            fit = 0
+        if not (0 <= demo < nprod):
+            demo, fit = -1, 0  # нет валидной области -> в гейт не пройдёт
         o = dict(o)
-        o["fit"] = best_fit
-        o["demo"] = best_demo
-        o["why"] = (f"ключи: {best_why}" if best_why else "нет совпадений")
+        o["fit"] = fit
+        o["demo"] = demo
+        o["why"] = str(obj.get("why", "")).strip()[:200]
         out.append(o)
     out.sort(key=lambda x: x.get("fit", 0), reverse=True)
     return out
