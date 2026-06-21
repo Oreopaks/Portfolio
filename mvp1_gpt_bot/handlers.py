@@ -19,6 +19,7 @@ if _ROOT not in sys.path:
 
 import shared.config  # noqa: F401  — побочный эффект: подхватывает .env
 from shared.llm import chat
+from demo_bot.showcase import handle_demo  # портфолио-витрина (/demo, /copy, /smm, /rag, /lead)
 
 # Куда писать брони. Можно переопределить через переменную окружения (удобно в тестах).
 BOOKINGS_CSV = os.environ.get(
@@ -62,7 +63,8 @@ def _greeting_reply(kb: dict) -> str:
         "Я подскажу меню, часы работы и адрес, отвечу на вопросы — "
         "а ещё могу записать вас на столик. Просто напишите, что нужно!\n"
         "Например: «во сколько открываетесь?», «сколько стоит латте?» "
-        "или «хочу забронировать столик»."
+        "или «хочу забронировать столик».\n\n"
+        "🧪 Пришли /demo — витрина других моих AI-решений (копирайтер, SMM, RAG, скоринг заявок)."
     )
 
 
@@ -104,6 +106,12 @@ def handle_message(text: str, state: dict, kb: dict) -> tuple[str, dict]:
     """
     state = dict(state or {})
     text = (text or "").strip()
+
+    # --- 0. Портфолио-витрина (/demo, /copy, /smm, /rag, /lead) — выше всего ---
+    # handle_demo вернёт None, если текст не про витрину -> идём в логику кофейни.
+    demo = handle_demo(text, state)
+    if demo is not None:
+        return demo
 
     # --- 1. Незавершённая бронь имеет приоритет (мы внутри многошагового флоу) ---
     if state.get("flow") == "booking":

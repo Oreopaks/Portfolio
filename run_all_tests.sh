@@ -11,7 +11,8 @@ for t in mvp1_gpt_bot/test_bot.py \
          mvp3_rag/test_rag.py \
          mvp4_scout/test_scout.py \
          mvp5_copywriter/test_copywriter.py \
-         mvp6_smm/test_smm.py; do
+         mvp6_smm/test_smm.py \
+         demo_bot/test_showcase.py; do
   echo "── $t ──"
   if ! "$PY" "$t"; then
     echo "FAIL: $t"; fail=1
