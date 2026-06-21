@@ -14,6 +14,7 @@ from shared.llm import chat
 
 PORTFOLIO_URL = "https://oreopaks.github.io/Portfolio/"
 BOT_DEMO_URL = "https://t.me/sdfghjklmvds_bot"
+LANDING_DEMO_URL = "https://oreopaks.github.io/Portfolio/demo-landing/"
 
 # Профиль фрилансера: реальные ГОТОВЫЕ проекты с живыми демо.
 # Под каждый заказ make_draft выберет самый релевантный и сошлётся на него.
@@ -47,6 +48,24 @@ PROFILE = {
             "desc": "автомониторинг площадок и сбор данных, выгрузка в Excel/Google Sheets/Telegram",
             "ready": "рабочий скрипт",
             "link": PORTFOLIO_URL,
+        },
+        {
+            "name": "AI-копирайтер",
+            "desc": "генерит SEO-тексты, описания товаров, продающие посты и email-рассылки под ваш бренд",
+            "ready": "рабочий генератор текстов (4 формата)",
+            "link": PORTFOLIO_URL,
+        },
+        {
+            "name": "AI-SMM-менеджер",
+            "desc": "недельный контент-план + готовые посты под Telegram/VK/Instagram с рубриками и хэштегами",
+            "ready": "рабочий генератор контент-плана и постов",
+            "link": PORTFOLIO_URL,
+        },
+        {
+            "name": "Лендинги и веб-страницы",
+            "desc": "адаптивные продающие лендинги с интерактивом (калькулятор, форма, анимации) на HTML/CSS/JS",
+            "ready": "живой демо-лендинг — можно потыкать",
+            "link": LANDING_DEMO_URL,
         },
     ],
 }

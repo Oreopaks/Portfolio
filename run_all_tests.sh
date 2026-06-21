@@ -9,7 +9,9 @@ fail=0
 for t in mvp1_gpt_bot/test_bot.py \
          mvp2_n8n_automation/test_reference.py \
          mvp3_rag/test_rag.py \
-         mvp4_scout/test_scout.py; do
+         mvp4_scout/test_scout.py \
+         mvp5_copywriter/test_copywriter.py \
+         mvp6_smm/test_smm.py; do
   echo "── $t ──"
   if ! "$PY" "$t"; then
     echo "FAIL: $t"; fail=1

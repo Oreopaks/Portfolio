@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="Демо-лендинг: адаптивная посадочная страница с интерактивным калькулятором стоимости, формой заявки и анимациями. Пример веб-разработки Олега Крючкова.">
+<title>Лендинг под ключ за 5 дней — демо · Олег Крючков</title>
+<style>
+  :root{
+    --bg:#0b1020; --bg2:#121933; --card:#161f3d; --line:#26304f;
+    --txt:#eef1fb; --mut:#9aa6c7; --acc:#5b8cff; --acc2:#7b5bff; --ok:#33d69f;
+    --rad:16px; --max:1080px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{font-family:'Segoe UI',system-ui,-apple-system,Roboto,sans-serif;background:var(--bg);color:var(--txt);line-height:1.6;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:var(--max);margin:0 auto;padding:0 20px}
+  a{color:inherit;text-decoration:none}
+  .btn{display:inline-block;padding:14px 28px;border-radius:999px;font-weight:600;cursor:pointer;border:none;transition:transform .15s,box-shadow .15s;font-size:15px}
+  .btn-primary{background:linear-gradient(135deg,var(--acc),var(--acc2));color:#fff;box-shadow:0 10px 30px rgba(91,140,255,.35)}
+  .btn-primary:hover{transform:translateY(-2px);box-shadow:0 14px 38px rgba(91,140,255,.5)}
+  .btn-ghost{background:transparent;border:1px solid var(--line);color:var(--txt)}
+  .btn-ghost:hover{border-color:var(--acc)}
+
+  /* nav */
+  nav{position:sticky;top:0;z-index:20;background:rgba(11,16,32,.8);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+  nav .wrap{display:flex;align-items:center;justify-content:space-between;height:64px}
+  .logo{font-weight:800;font-size:18px}
+  .logo span{color:var(--acc)}
+  .nav-cta{padding:10px 20px;font-size:14px}
+
+  /* hero */
+  .hero{position:relative;padding:90px 0 70px;text-align:center;overflow:hidden}
+  .hero::before{content:"";position:absolute;inset:0;background:radial-gradient(600px 300px at 50% -10%,rgba(123,91,255,.25),transparent 60%);pointer-events:none}
+  .badge{display:inline-block;padding:6px 16px;border:1px solid var(--line);border-radius:999px;color:var(--mut);font-size:13px;margin-bottom:22px}
+  .badge b{color:var(--ok)}
+  h1{font-size:clamp(30px,6vw,52px);line-height:1.1;letter-spacing:-.02em;margin-bottom:18px}
+  h1 .grad{background:linear-gradient(135deg,var(--acc),var(--acc2));-webkit-background-clip:text;background-clip:text;color:transparent}
+  .lead{font-size:clamp(16px,2.4vw,20px);color:var(--mut);max-width:620px;margin:0 auto 30px}
+  .hero-cta{display:flex;gap:14px;justify-content:center;flex-wrap:wrap}
+  .trust{margin-top:34px;display:flex;gap:28px;justify-content:center;flex-wrap:wrap;color:var(--mut);font-size:14px}
+  .trust b{color:var(--txt);font-size:22px;display:block}
+
+  section{padding:64px 0}
+  .eyebrow{color:var(--acc);font-weight:700;font-size:13px;letter-spacing:.08em;text-transform:uppercase;text-align:center}
+  h2{font-size:clamp(24px,4vw,36px);text-align:center;margin:8px 0 40px;letter-spacing:-.01em}
+
+  /* features */
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:18px}
+  .feat{background:var(--card);border:1px solid var(--line);border-radius:var(--rad);padding:26px;transition:transform .2s,border-color .2s}
+  .feat:hover{transform:translateY(-4px);border-color:var(--acc)}
+  .feat .ic{font-size:28px;margin-bottom:12px}
+  .feat h3{font-size:18px;margin-bottom:8px}
+  .feat p{color:var(--mut);font-size:15px}
+
+  /* calculator */
+  .calc{background:linear-gradient(180deg,var(--bg2),var(--bg));border:1px solid var(--line);border-radius:24px;padding:34px;max-width:760px;margin:0 auto}
+  .calc-row{margin-bottom:22px}
+  .calc-row label{display:block;margin-bottom:10px;font-weight:600}
+  .opts{display:flex;gap:10px;flex-wrap:wrap}
+  .opt{flex:1 1 140px;padding:14px;border:1px solid var(--line);border-radius:12px;background:var(--card);cursor:pointer;text-align:center;transition:.15s;font-size:14px}
+  .opt small{display:block;color:var(--mut);margin-top:4px}
+  .opt.active{border-color:var(--acc);box-shadow:0 0 0 2px rgba(91,140,255,.3) inset}
+  .toggles{display:flex;gap:10px;flex-wrap:wrap}
+  .chip{padding:10px 16px;border:1px solid var(--line);border-radius:999px;background:var(--card);cursor:pointer;font-size:14px;transition:.15s;user-select:none}
+  .chip.active{border-color:var(--ok);color:var(--ok)}
+  .total{display:flex;align-items:center;justify-content:space-between;margin-top:26px;padding-top:22px;border-top:1px solid var(--line);flex-wrap:wrap;gap:14px}
+  .total .price{font-size:34px;font-weight:800}
+  .total .price small{font-size:15px;color:var(--mut);font-weight:500}
+  .total .days{color:var(--mut)}
+
+  /* faq */
+  .faq{max-width:760px;margin:0 auto}
+  .qa{border:1px solid var(--line);border-radius:12px;margin-bottom:12px;overflow:hidden;background:var(--card)}
+  .qa button{width:100%;text-align:left;padding:18px 22px;background:none;border:none;color:var(--txt);font-size:16px;font-weight:600;cursor:pointer;display:flex;justify-content:space-between;align-items:center;gap:12px}
+  .qa .ans{max-height:0;overflow:hidden;transition:max-height .3s ease;color:var(--mut)}
+  .qa .ans p{padding:0 22px 18px}
+  .qa.open .ans{max-height:200px}
+  .qa .arr{transition:transform .3s;color:var(--acc)}
+  .qa.open .arr{transform:rotate(180deg)}
+
+  /* form */
+  .lead-form{max-width:540px;margin:0 auto;background:var(--card);border:1px solid var(--line);border-radius:var(--rad);padding:30px}
+  .lead-form input{width:100%;padding:14px 16px;margin-bottom:14px;border-radius:12px;border:1px solid var(--line);background:var(--bg);color:var(--txt);font-size:15px}
+  .lead-form input:focus{outline:none;border-color:var(--acc)}
+  .lead-form .btn{width:100%}
+  .form-ok{display:none;text-align:center;color:var(--ok);font-weight:600;padding:14px}
+  .err{border-color:#ff6b6b!important}
+
+  footer{border-top:1px solid var(--line);padding:30px 0;text-align:center;color:var(--mut);font-size:14px}
+  .demo-note{position:fixed;left:0;right:0;bottom:0;background:var(--acc2);color:#fff;text-align:center;padding:9px;font-size:13px;z-index:30}
+  .demo-note a{text-decoration:underline}
+  .reveal{opacity:0;transform:translateY(24px);transition:opacity .6s,transform .6s}
+  .reveal.in{opacity:1;transform:none}
+  @media(max-width:560px){.trust{gap:18px}.nav-cta{display:none}}
+</style>
+</head>
+<body>
+
+<nav><div class="wrap">
+  <a class="logo" href="#top">Лендинг<span>.под ключ</span></a>
+  <a class="btn btn-primary nav-cta" href="#zayavka">Получить расчёт</a>
+</div></nav>
+
+<header class="hero" id="top"><div class="wrap">
+  <div class="badge"><b>●</b> Свободен для 2 проектов в этом месяце</div>
+  <h1>Продающий лендинг <span class="grad">под ключ за 5 дней</span></h1>
+  <p class="lead">Адаптивная посадочная страница с интерактивом, формой заявки и аналитикой. Дизайн, вёрстка, тексты и подключение — всё в одном месте.</p>
+  <div class="hero-cta">
+    <a class="btn btn-primary" href="#zayavka">Рассчитать стоимость</a>
+    <a class="btn btn-ghost" href="#calc">Калькулятор ↓</a>
+  </div>
+  <div class="trust">
+    <div><b>5 дней</b>средний срок</div>
+    <div><b>100%</b>адаптив под телефон</div>
+    <div><b>+1 мес</b>правок бесплатно</div>
+  </div>
+</div></header>
+
+<section><div class="wrap">
+  <div class="eyebrow">Что входит</div>
+  <h2>Не просто страница — инструмент продаж</h2>
+  <div class="grid">
+    <div class="feat reveal"><div class="ic">⚡</div><h3>Скорость загрузки</h3><p>Чистый HTML/CSS/JS без тяжёлых конструкторов. Грузится мгновенно даже на мобильном интернете.</p></div>
+    <div class="feat reveal"><div class="ic">📱</div><h3>Адаптив</h3><p>Идеально выглядит на телефоне, планшете и десктопе. 70% заявок приходят с мобильных.</p></div>
+    <div class="feat reveal"><div class="ic">🧮</div><h3>Интерактив</h3><p>Калькуляторы, квизы, формы — вовлекают посетителя и повышают конверсию в заявку.</p></div>
+    <div class="feat reveal"><div class="ic">📊</div><h3>Аналитика</h3><p>Подключаю Метрику и цели: видно, откуда приходят заявки и что улучшать.</p></div>
+  </div>
+</div></section>
+
+<section id="calc"><div class="wrap">
+  <div class="eyebrow">Калькулятор</div>
+  <h2>Сколько стоит ваш лендинг</h2>
+  <div class="calc">
+    <div class="calc-row">
+      <label>1. Объём страницы</label>
+      <div class="opts" id="size">
+        <div class="opt active" data-price="20000" data-days="3">Простой<small>1 экран + форма</small></div>
+        <div class="opt" data-price="40000" data-days="5">Стандарт<small>5-7 блоков</small></div>
+        <div class="opt" data-price="70000" data-days="8">Премиум<small>анимации, интерактив</small></div>
+      </div>
+    </div>
+    <div class="calc-row">
+      <label>2. Дополнительно</label>
+      <div class="toggles" id="extras">
+        <div class="chip" data-price="8000" data-days="1">Тексты-копирайт</div>
+        <div class="chip" data-price="6000" data-days="1">Калькулятор/квиз</div>
+        <div class="chip" data-price="5000" data-days="1">Интеграция с CRM</div>
+        <div class="chip" data-price="4000" data-days="1">A/B-версия</div>
+      </div>
+    </div>
+    <div class="total">
+      <div>
+        <div class="price" id="price">20 000 <small>₽</small></div>
+        <div class="days" id="days">срок ~3 дня</div>
+      </div>
+      <a class="btn btn-primary" href="#zayavka">Заказать за эту цену</a>
+    </div>
+  </div>
+</div></section>
+
+<section><div class="wrap">
+  <div class="eyebrow">Вопросы</div>
+  <h2>Частые вопросы</h2>
+  <div class="faq" id="faq">
+    <div class="qa"><button>А если мне не понравится результат? <span class="arr">▾</span></button><div class="ans"><p>Работаем по этапам с предоплатой 50%. Сначала согласуем прототип и тексты — вы видите структуру до вёрстки. Месяц правок после сдачи включён в цену.</p></div></div>
+    <div class="qa"><button>На чём делаете — Tilda или код? <span class="arr">▾</span></button><div class="ans"><p>Чистый код (HTML/CSS/JS) — он быстрее, легче, без абонентской платы за конструктор и полностью ваш. По желанию соберу и на Tilda/WordPress.</p></div></div>
+    <div class="qa"><button>Кто пишет тексты и делает дизайн? <span class="arr">▾</span></button><div class="ans"><p>Тексты — через AI-копирайтер с моей вычиткой под ваш оффер. Дизайн — по современным шаблонам, адаптирую под ваш бренд и цвета.</p></div></div>
+    <div class="qa"><button>Что нужно от меня для старта? <span class="arr">▾</span></button><div class="ans"><p>Короткий бриф: что продаёте, кому, ваши контакты и пожелания. Остальное соберём на 15-минутном созвоне.</p></div></div>
+  </div>
+</div></section>
+
+<section id="zayavka"><div class="wrap">
+  <div class="eyebrow">Заявка</div>
+  <h2>Получить расчёт и прототип</h2>
+  <form class="lead-form" id="form" novalidate>
+    <input type="text" id="name" placeholder="Как вас зовут" autocomplete="name">
+    <input type="text" id="contact" placeholder="Telegram или телефон" autocomplete="off">
+    <input type="text" id="task" placeholder="Что нужно (пару слов)">
+    <button class="btn btn-primary" type="submit">Отправить заявку</button>
+    <div class="form-ok" id="ok">✓ Заявка принята! Свяжусь с вами в течение пары часов.</div>
+  </form>
+</div></section>
+
+<footer><div class="wrap">
+  Олег Крючков — веб-разработка под ключ · <a href="https://t.me/Oreopaks" style="color:var(--acc)">@Oreopaks</a>
+</div></footer>
+
+<div class="demo-note">🧪 Это демо-лендинг (пример работы). Заявка никуда не уходит. Связь — <a href="https://t.me/Oreopaks">@Oreopaks</a></div>
+
+<script>
+// ---- Калькулятор стоимости ----
+var BASE_PHONE = 0; // расчёт идёт в браузере, без бэкенда
+function fmt(n){return n.toLocaleString('ru-RU')}
+function recalc(){
+  var size=document.querySelector('#size .opt.active');
+  var price=+size.dataset.price, days=+size.dataset.days;
+  document.querySelectorAll('#extras .chip.active').forEach(function(c){
+    price+=+c.dataset.price; days+=+c.dataset.days;
+  });
+  document.getElementById('price').innerHTML=fmt(price)+' <small>₽</small>';
+  document.getElementById('days').textContent='срок ~'+days+' '+plural(days,['день','дня','дней']);
+}
+function plural(n,f){var n10=n%10,n100=n%100;return n10==1&&n100!=11?f[0]:(n10>=2&&n10<=4&&(n100<10||n100>=20)?f[1]:f[2])}
+document.querySelectorAll('#size .opt').forEach(function(o){
+  o.addEventListener('click',function(){
+    document.querySelectorAll('#size .opt').forEach(function(x){x.classList.remove('active')});
+    o.classList.add('active');recalc();
+  });
+});
+document.querySelectorAll('#extras .chip').forEach(function(c){
+  c.addEventListener('click',function(){c.classList.toggle('active');recalc()});
+});
+
+// ---- FAQ аккордеон ----
+document.querySelectorAll('#faq .qa button').forEach(function(b){
+  b.addEventListener('click',function(){b.parentElement.classList.toggle('open')});
+});
+
+// ---- Форма (фронт-валидация, без отправки) ----
+document.getElementById('form').addEventListener('submit',function(e){
+  e.preventDefault();
+  var ok=true;
+  ['name','contact'].forEach(function(id){
+    var el=document.getElementById(id);
+    if(!el.value.trim()){el.classList.add('err');ok=false}else{el.classList.remove('err')}
+  });
+  if(!ok)return;
+  this.querySelectorAll('input,button[type=submit]').forEach(function(x){x.style.display='none'});
+  document.getElementById('ok').style.display='block';
+});
+
+// ---- Reveal-анимация при скролле ----
+var io=new IntersectionObserver(function(es){es.forEach(function(e){if(e.isIntersecting)e.target.classList.add('in')})},{threshold:.15});
+document.querySelectorAll('.reveal').forEach(function(el){io.observe(el)});
+</script>
+</body>
+</html>
