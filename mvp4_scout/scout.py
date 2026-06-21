@@ -25,6 +25,8 @@ except ImportError:
     requests = None
 
 from mvp4_scout.fl_source import fetch_fl_rss, fetch_fl_listing
+from mvp4_scout.kwork_source import fetch_kwork
+from mvp4_scout.weblancer_source import fetch_weblancer
 from mvp4_scout.tg_source import fetch_tg_orders
 from mvp4_scout.draft import make_draft, PROFILE
 from mvp4_scout.relevance import score_orders
@@ -40,9 +42,25 @@ from mvp4_scout.rank import (
 SEEN_PATH = Path(__file__).resolve().parent / "seen.json"
 
 # Настройки берутся из env (с дефолтами), чтобы конфиг жил в Secrets.
-KEYWORDS = [k.strip() for k in os.environ.get("SCOUT_KEYWORDS", "бот,парсинг,автоматизация,GPT,Telegram").split(",") if k.strip()]
+# Ключи покрывают ВСЕ 4 области профиля (боты / автоматизация-интеграции / RAG /
+# парсинг) — широкая сеть на дешёвом префильтре; точный роутинг по области даёт
+# LLM в relevance.py. Совпадение — по началу слова (см. _kw_hit/keyword_strength).
+_DEFAULT_KEYWORDS = (
+    "бот,чат-бот,GPT,Telegram,ассистент,"            # область 0: GPT-боты
+    "автоматизаци,интеграци,n8n,zapier,make,webhook,CRM,рассылк,api,"  # 1: автоматизация
+    "rag,нейросет,база знаний,документ,"             # 2: RAG / поиск по документам
+    "парсинг,парсер,скрапинг,спарсить,мониторинг цен"  # 3: парсинг / сбор данных
+)
+KEYWORDS = [k.strip() for k in os.environ.get("SCOUT_KEYWORDS", _DEFAULT_KEYWORDS).split(",") if k.strip()]
 MIN_BUDGET = int(os.environ.get("SCOUT_MIN_BUDGET", "10000"))
+# Какие биржи опрашивать (РФ-доступные, регистрация+отклик открыты): fl,kwork,weblancer.
+SOURCES = {s.strip() for s in os.environ.get("SCOUT_SOURCES", "fl,kwork,weblancer").split(",") if s.strip()}
+KWORK_PAGES = int(os.environ.get("SCOUT_KWORK_PAGES", "2"))           # ~12 заказов/стр
+WEBLANCER_PAGES = int(os.environ.get("SCOUT_WEBLANCER_PAGES", "1"))   # ~20 заказов/стр
 TG_CHANNELS = [c.strip() for c in os.environ.get("SCOUT_TG_CHANNELS", "").split(",") if c.strip()]
+
+# Человекочитаемые имена бирж для уведомления.
+_SOURCE_LABEL = {"fl": "FL.ru", "kwork": "Kwork", "weblancer": "Weblancer", "tg": "Telegram"}
 # Порог LLM-релевантности (0-100): ниже — не шлём. Мусор стабильно получает
 # demo=-1 -> fit=0. 60 режет слабые «смежно», оставляя уверенные матчи.
 FIT_MIN = int(os.environ.get("SCOUT_SCORE_MIN", "60"))
@@ -181,25 +199,44 @@ def run_cycle() -> int:
     """Полный цикл скаута. Возвращает число новых уведомлений."""
     orders: list[dict] = []
 
-    # Основной источник — страница списка fl.ru/projects/: в карточках есть число
-    # откликов, возраст и просмотры (сигналы «стоит ли откликаться»).
-    try:
-        orders.extend(fetch_fl_listing(SCOUT_PAGES))
-    except Exception as e:
-        print(f"[scout] FL.ru listing недоступен: {e}")
-
-    # Фоллбэк на RSS, если список пуст (смена вёрстки/сеть) — без откликов/возраста.
-    if not orders:
+    # --- FL.ru: страница списка (число откликов/возраст/просмотры). RSS — фоллбэк.
+    if "fl" in SOURCES:
+        fl_orders: list[dict] = []
         try:
-            orders.extend(fetch_fl_rss())
-            print("[scout] листинг пуст — фоллбэк на RSS")
+            fl_orders = fetch_fl_listing(SCOUT_PAGES)
         except Exception as e:
-            print(f"[scout] FL.ru RSS недоступен: {e}")
+            print(f"[scout] FL.ru listing недоступен: {e}")
+        if not fl_orders:  # смена вёрстки/сеть -> RSS (без откликов/возраста)
+            try:
+                fl_orders = fetch_fl_rss()
+                print("[scout] листинг пуст — фоллбэк на RSS")
+            except Exception as e:
+                print(f"[scout] FL.ru RSS недоступен: {e}")
+        for o in fl_orders:
+            o.setdefault("source", "fl")
+        orders.extend(fl_orders)
+
+    # --- Kwork: крупнейшая РФ-биржа, всё в рублях, встроенный JSON с откликами.
+    if "kwork" in SOURCES:
+        try:
+            orders.extend(fetch_kwork(KWORK_PAGES))
+        except Exception as e:
+            print(f"[scout] Kwork недоступен: {e}")
+
+    # --- Weblancer: SSR-карточки с числом заявок (бюджет берём только в рублях).
+    if "weblancer" in SOURCES:
+        try:
+            orders.extend(fetch_weblancer(WEBLANCER_PAGES))
+        except Exception as e:
+            print(f"[scout] Weblancer недоступен: {e}")
 
     # Telegram (только если заданы каналы; иначе пропустит само)
     if TG_CHANNELS:
         try:
-            orders.extend(fetch_tg_orders(TG_CHANNELS))
+            tg_orders = fetch_tg_orders(TG_CHANNELS)
+            for o in tg_orders:
+                o.setdefault("source", "tg")
+            orders.extend(tg_orders)
         except Exception as e:
             print(f"[scout] Telegram недоступен: {e}")
 
@@ -252,8 +289,9 @@ def run_cycle() -> int:
         resp = o.get("responses")
         resp_str = str(resp) if resp is not None else "—"
         demo_name = PROFILE["projects"][demo]["name"] if 0 <= demo < len(PROFILE["projects"]) else "—"
+        src = _SOURCE_LABEL.get(o.get("source"), o.get("source") or "—")
         text = (
-            f"🆕 «{demo_name}» · приоритет {int(o.get('priority', 0))}\n"
+            f"🆕 [{src}] «{demo_name}» · приоритет {int(o.get('priority', 0))}\n"
             f"{o.get('title')}\n"
             f"💰 Бюджет: {budget_str}{roi_str}\n"
             f"📊 Откликов: {resp_str} · возраст {_fmt_age(o.get('age_hours'))} · шанс ~{int(o['win_prob'] * 100)}%\n"

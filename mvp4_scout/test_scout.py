@@ -6,7 +6,11 @@ import sys
 
 sys.path.insert(0, "/home/oleg/freelance-mvp")
 
+from datetime import datetime
+
 from mvp4_scout.fl_source import parse_orders, parse_listing
+from mvp4_scout.kwork_source import parse_kwork
+from mvp4_scout.weblancer_source import parse_weblancer
 from mvp4_scout.scout import filter_orders, _is_blacklisted
 from mvp4_scout.draft import make_draft, PROFILE
 from mvp4_scout import rank
@@ -162,6 +166,74 @@ def test_rank_model():
     print("ok rank_model: age/win_prob/roi/priority/prescore монотонны и корректны")
 
 
+# --- Фикстура: встроенный JSON Kwork ("wants":[...]) как на живой /projects ----
+# description со скобкой «[» — регресс-гард строкового сканера _extract_wants.
+KWORK_FIXTURE = (
+    '<html><script>window.config={"foo":1,"wants":['
+    '{"id":3202020,"name":"Чат-бот в Telegram на GPT","description":"Нужен умный бот [поддержка]",'
+    '"possiblePriceLimit":15000,"priceLimit":"5000.00","kwork_count":3,"files":[],'
+    '"wantDates":{"dateCreate":"21 июня","dateExpire":"23 июня"}},'
+    '{"id":3202021,"name":"Сверстать лендинг","description":"HTML вёрстка",'
+    '"possiblePriceLimit":4000,"priceLimit":"4000.00","kwork_count":12,"files":[],'
+    '"wantDates":{"dateCreate":"19 июня"}}'
+    ']};</script></html>'
+)
+
+
+def test_parse_kwork():
+    now = datetime(2026, 6, 21, 12, 0, 0)
+    orders = parse_kwork(KWORK_FIXTURE, now=now)
+    assert len(orders) == 2, f"ожидалось 2, получено {len(orders)} (строковый сканер?)"
+    a, b = orders[0], orders[1]
+
+    assert a["budget"] == 15000, a["budget"]            # possiblePriceLimit, в рублях
+    assert a["responses"] == 3, a["responses"]          # kwork_count -> отклики
+    assert a["url"] == "https://kwork.ru/projects/3202020/view", a["url"]
+    assert a["source"] == "kwork", a["source"]
+    assert a["age_hours"] is not None and a["age_hours"] < 24, a["age_hours"]  # 21 июня
+    assert "бот" in a["title"].lower(), a["title"]
+
+    assert b["age_hours"] >= 24, b["age_hours"]         # 19 июня -> ~2 дня
+    print("ok parse_kwork: 2 заказа, бюджет/отклики/возраст/url, скобка в desc не сломала")
+
+
+# --- Фикстура: SSR-карточки Weblancer (₽ vs $; «N заявок») ---------------------
+WEBLANCER_FIXTURE = (
+    '<div class="card"><a class="x" '
+    'href="/freelance/avtomatizatsiya-50/telegram-bot-na-python-1267777/">Telegram-бот на Python</a>'
+    '<p>Нужен бот для рассылок.</p><span>15 000 руб</span><span>4 заявок</span></div>'
+    '<div class="card"><a class="x" '
+    'href="/freelance/dizain-19/logotip-dlya-kafe-1267778/">Логотип для кафе</a>'
+    '<p>Нарисовать лого.</p><span>50 $</span><span>20 заявок</span></div>'
+)
+
+
+def test_parse_weblancer():
+    orders = parse_weblancer(WEBLANCER_FIXTURE)
+    assert len(orders) == 2, f"ожидалось 2, получено {len(orders)}"
+    by = {o["url"]: o for o in orders}
+    bot = by["https://www.weblancer.net/freelance/avtomatizatsiya-50/telegram-bot-na-python-1267777/"]
+    log = by["https://www.weblancer.net/freelance/dizain-19/logotip-dlya-kafe-1267778/"]
+
+    assert bot["budget"] == 15000, bot["budget"]        # «15 000 руб» -> рубли распознаны
+    assert bot["responses"] == 4, bot["responses"]
+    assert bot["source"] == "weblancer", bot["source"]
+    assert log["budget"] is None, log["budget"]          # «50 $» -> не рубли -> None
+    assert log["responses"] == 20, log["responses"]
+    print("ok parse_weblancer: 2 карточки, ₽ распознан, $ -> None, заявки распознаны")
+
+
+def test_ru_date_age():
+    now = datetime(2026, 6, 21, 12, 0, 0)
+    assert rank.ru_date_age_hours(None, now) is None
+    assert abs(rank.ru_date_age_hours("21 июня", now) - 12.0) < 0.01   # сегодня, с полуночи
+    assert abs(rank.ru_date_age_hours("19 июня", now) - 60.0) < 0.01   # 2 дня + 12ч
+    # конец декабря при текущем июне -> прошлый год (не отрицательный возраст)
+    assert rank.ru_date_age_hours("31 декабря", now) > 0
+    assert rank.ru_date_age_hours("мусор", now) is None
+    print("ok ru_date_age: парсинг даты Kwork и переход через год")
+
+
 def test_blacklist():
     # «такое не нужно»: OSINT/пробив/накрутка отсекаются ДО LLM
     assert _is_blacklisted({"title": "Ищу цифровой след человека", "desc": ""})
@@ -187,6 +259,9 @@ if __name__ == "__main__":
     test_parse_orders()
     test_filter_orders()
     test_parse_listing()
+    test_parse_kwork()
+    test_parse_weblancer()
+    test_ru_date_age()
     test_rank_model()
     test_blacklist()
     test_make_draft()

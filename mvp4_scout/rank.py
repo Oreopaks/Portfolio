@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 import re
+from datetime import datetime
 
 # Оценка трудоёмкости по областям (индексы = PROFILE["projects"] в draft.py),
 # в рабочих днях. Грубо, но честно: ROI = бюджет / дни → ₽ в день.
@@ -43,6 +44,41 @@ def parse_age_hours(s: str | None) -> float | None:
         elif unit.startswith("недел"):
             h += n * 168.0
     return round(h, 2) if h > 0 else None
+
+
+_RU_MONTHS = {
+    "янв": 1, "фев": 2, "мар": 3, "апр": 4, "мая": 5, "май": 5, "июн": 6,
+    "июл": 7, "авг": 8, "сен": 9, "окт": 10, "ноя": 11, "дек": 12,
+}
+
+
+def ru_date_age_hours(date_str: str | None, now: datetime | None = None) -> float | None:
+    """«21 июня» / «3 июля» -> возраст в часах относительно now. None, если не распознали.
+
+    Kwork отдаёт дату заказа днём, без времени -> берём начало того дня. Если
+    дата оказалась в будущем (конец декабря при текущем январе) -> прошлый год.
+    """
+    if not date_str:
+        return None
+    m = re.search(r"(\d{1,2})\s+([а-яё]+)", date_str.lower())
+    if not m:
+        return None
+    day = int(m.group(1))
+    pref = m.group(2)[:3]
+    mon = next((v for k, v in _RU_MONTHS.items() if pref.startswith(k)), None)
+    if mon is None:
+        return None
+    now = now or datetime.now()
+    try:
+        dt = datetime(now.year, mon, day)
+    except ValueError:
+        return None
+    if dt > now:
+        try:
+            dt = datetime(now.year - 1, mon, day)
+        except ValueError:
+            return None
+    return round(max(0.0, (now - dt).total_seconds() / 3600.0), 2)
 
 
 def _clamp(x: float, lo: float, hi: float) -> float:
@@ -82,8 +118,11 @@ def _budget_signal(budget: int | None) -> float:
 
 
 def keyword_strength(text: str, keywords: list[str]) -> float:
-    """Доля ключей профиля, встретившихся в тексте (по началу слова) -> [0..1].
+    """Сила темы по числу попавших ключей профиля (по началу слова) -> [0..1].
 
+    Нормировка по АБСОЛЮТНОМУ числу совпадений, а не по размеру словаря:
+    1 ключ -> 0.5, 2+ -> 1.0. Иначе расширение списка ключей под все области
+    профиля разбавляло бы сигнал и роняло пре-скор тематичных заказов.
     0 -> заказ вне профиля (в кандидаты под дорогую LLM не берём).
     """
     if not keywords:
@@ -91,7 +130,7 @@ def keyword_strength(text: str, keywords: list[str]) -> float:
     words = re.findall(r"[a-zA-Zа-яёА-ЯЁ0-9]+", text.lower())
     kws = [k.lower() for k in keywords]
     hit = sum(1 for k in kws if any(w.startswith(k) for w in words))
-    return _clamp(hit / max(1, len(kws)) * 2.0, 0.0, 1.0)  # 1 ключ из ~5 уже заметный сигнал
+    return _clamp(hit / 2.0, 0.0, 1.0)
 
 
 def prescore(order: dict, keywords: list[str]) -> float:

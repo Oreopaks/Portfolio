@@ -9,3 +9,5 @@ mvp1_gpt_bot/bookings.csv
 *.log
 .DS_Store
 # seen.json НЕ игнорим — его коммитит GitHub Actions скаута между запусками
+mvp4_scout/scout.log
+mvp4_scout/scout.lock

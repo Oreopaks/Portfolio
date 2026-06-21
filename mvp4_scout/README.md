@@ -1,7 +1,8 @@
 # MVP4 — Order Scout (разведчик заказов на фрилансе)
 
-Бот, который **круглосуточно ищет за тебя подходящие заказы** на FL.ru
-(и опционально в Telegram-каналах), оценивает их **не только по теме, но и по
+Бот, который **круглосуточно ищет за тебя подходящие заказы** на нескольких
+РФ-биржах (**FL.ru + Kwork + Weblancer**, опц. Telegram-каналы — все доступны для
+регистрации и отклика из РФ), оценивает их **не только по теме, но и по
 реальным шансам взять заказ** (сколько уже откликов, насколько свежий, цена ÷
 время), **сразу пишет персональный черновик отклика через LLM** и присылает всё
 готовым сообщением в твой Telegram. Работает бесплатно 24/7 на GitHub Actions
@@ -16,8 +17,10 @@
 
 ```
 mvp4_scout/
-├── fl_source.py     # FL.ru: parse_listing(html) [чистая, с откликами/возрастом] + fetch_fl_listing() [сеть]; RSS как фоллбэк
-├── tg_source.py     # Telegram-каналы через Telethon (опционально; без него -> [])
+├── fl_source.py        # FL.ru: parse_listing(html) [чистая, с откликами/возрастом] + fetch_fl_listing() [сеть]; RSS как фоллбэк
+├── kwork_source.py     # Kwork: parse_kwork(html) из встроенного JSON «wants» (бюджет ₽/отклики/дата) + fetch_kwork()
+├── weblancer_source.py # Weblancer: parse_weblancer(html) из SSR-карточек (бюджет только в ₽/заявки) + fetch_weblancer()
+├── tg_source.py        # Telegram-каналы через Telethon (опционально; без него -> [])
 ├── relevance.py     # score_orders(): LLM-оценка темы + область компетенции (fit/demo/why)
 ├── rank.py          # ДЕТЕРМИНИРОВАННАЯ модель: win_prob / ROI / priority / verdict (без сети/LLM)
 ├── draft.py         # make_draft(order, profile) -> отклик через shared.llm.chat + PROFILE
@@ -30,9 +33,9 @@ mvp4_scout/
 ## Архитектура (поток данных)
 
 ```
-        FL.ru листинг (requests)          Telegram (Telethon, опц.)
-        parse_listing: title/бюджет/             fetch_tg_orders
-        ОТКЛИКИ/ВОЗРАСТ/просмотры                       │
+   FL.ru / Kwork / Weblancer (requests)    Telegram (Telethon, опц.)
+   title/бюджет/ОТКЛИКИ/ВОЗРАСТ + source         fetch_tg_orders
+                  │                                     │
                   └──────────────┬───────────────┘
                                  ▼
           ДЕШЁВЫЕ ДЕТЕРМИНИРОВАННЫЕ ПРЕФИЛЬТРЫ (без LLM):
@@ -88,9 +91,12 @@ mvp4_scout/
 | `GIGACHAT_AUTH_KEY` | для gigachat | ключ авторизации GigaChat |
 | `SCOUT_NOTIFY_TOKEN` | да | токен Telegram-бота, который шлёт тебе уведомления (от @BotFather) |
 | `SCOUT_NOTIFY_CHAT_ID` | да | твой chat_id (узнать у @userinfobot) |
-| `SCOUT_KEYWORDS` | нет | ключи темы через запятую (деф.: `бот,парсинг,автоматизация,GPT,Telegram`) |
+| `SCOUT_KEYWORDS` | нет | ключи темы через запятую (деф. покрывает все 4 области: боты/автоматизация/RAG/парсинг) |
 | `SCOUT_MIN_BUDGET` | нет | мин. бюджет в рублях (деф.: `10000`; «по договорённости» проходит) |
-| `SCOUT_PAGES` | нет | сколько страниц списка тянуть, ~30 заказов/стр (деф.: `3`) |
+| `SCOUT_SOURCES` | нет | какие биржи опрашивать через запятую (деф.: `fl,kwork,weblancer`) |
+| `SCOUT_PAGES` | нет | страниц листинга FL.ru, ~30 заказов/стр (деф.: `3`) |
+| `SCOUT_KWORK_PAGES` | нет | страниц Kwork, ~12 заказов/стр (деф.: `2`) |
+| `SCOUT_WEBLANCER_PAGES` | нет | страниц Weblancer, ~20 заказов/стр (деф.: `1`) |
 | `SCOUT_TOP_K` | нет | сколько кандидатов отдавать дорогой LLM-оценке (деф.: `12`) |
 | `SCOUT_SCORE_MIN` | нет | порог LLM-релевантности fit 0-100 (деф.: `60`) |
 | `SCOUT_MAX_RESPONSES` | нет | жёсткий потолок откликов — режет вакансий-спам (деф.: `60`) |
