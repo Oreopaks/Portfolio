@@ -55,8 +55,8 @@ KEYWORDS = [k.strip() for k in os.environ.get("SCOUT_KEYWORDS", _DEFAULT_KEYWORD
 MIN_BUDGET = int(os.environ.get("SCOUT_MIN_BUDGET", "10000"))
 # Какие биржи опрашивать (РФ-доступные, регистрация+отклик открыты): fl,kwork,weblancer.
 SOURCES = {s.strip() for s in os.environ.get("SCOUT_SOURCES", "fl,kwork,weblancer").split(",") if s.strip()}
-KWORK_PAGES = int(os.environ.get("SCOUT_KWORK_PAGES", "2"))           # ~12 заказов/стр
-WEBLANCER_PAGES = int(os.environ.get("SCOUT_WEBLANCER_PAGES", "1"))   # ~20 заказов/стр
+KWORK_PAGES = int(os.environ.get("SCOUT_KWORK_PAGES", "8"))           # ~12 заказов/стр, бюджет 100%
+WEBLANCER_PAGES = int(os.environ.get("SCOUT_WEBLANCER_PAGES", "4"))   # ~20 заказов/стр
 TG_CHANNELS = [c.strip() for c in os.environ.get("SCOUT_TG_CHANNELS", "").split(",") if c.strip()]
 
 # Человекочитаемые имена бирж для уведомления.
@@ -65,9 +65,9 @@ _SOURCE_LABEL = {"fl": "FL.ru", "kwork": "Kwork", "weblancer": "Weblancer", "tg"
 # demo=-1 -> fit=0. 60 режет слабые «смежно», оставляя уверенные матчи.
 FIT_MIN = int(os.environ.get("SCOUT_SCORE_MIN", "60"))
 # Объём парсинга: сколько страниц списка тянуть (~30 заказов на страницу).
-SCOUT_PAGES = int(os.environ.get("SCOUT_PAGES", "3"))
+SCOUT_PAGES = int(os.environ.get("SCOUT_PAGES", "8"))
 # Cap на дорогую LLM-оценку: берём топ-K кандидатов по дешёвому pre-score.
-SCOUT_TOP_K = int(os.environ.get("SCOUT_TOP_K", "12"))
+SCOUT_TOP_K = int(os.environ.get("SCOUT_TOP_K", "16"))
 # Жёсткий потолок откликов — режет только вакансий-спам (100+ откликов). Заказы
 # с умеренной конкуренцией НЕ выкидываем: их шанс уходит в win_prob/priority и
 # показывается в уведомлении — решает пользователь, а не молчаливый дроп.
@@ -274,9 +274,13 @@ def run_cycle() -> int:
     step = [o for o in step if (o.get("url") or o.get("title")) not in seen]
 
     # Pre-score -> топ-K под дорогую LLM (цена/время самого скаута).
+    # При большом охвате (сотни заказов) чистый prescore топит настоящие AI-заказы
+    # (GPT/RAG/нейросеть/агент) под generic-шумом с 2 ключами. Поэтому СНАЧАЛА
+    # заказы с явным AI-ядром в заголовке/описании, потом по prescore.
     for o in step:
         o["pre"] = prescore(o, KEYWORDS)
-    step.sort(key=lambda o: o["pre"], reverse=True)
+        o["_aicore"] = bool(_AICORE.search(f"{o.get('title','')} {o.get('desc','')}"))
+    step.sort(key=lambda o: (o["_aicore"], o["pre"]), reverse=True)
     candidates = step[:SCOUT_TOP_K]
     print(f"[scout] собрано {len(orders)} -> уник {len(uniq)} -> кандидатов {len(step)} -> в LLM {len(candidates)}")
 
