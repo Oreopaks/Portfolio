@@ -37,6 +37,7 @@ from mvp4_scout.rank import (
     roi,
     verdict,
     keyword_strength,
+    suggest_price,
 )
 
 SEEN_PATH = Path(__file__).resolve().parent / "seen.json"
@@ -308,9 +309,15 @@ def run_cycle() -> int:
         except Exception as e:
             draft = f"(не удалось сгенерировать отклик: {e})"
         budget = o.get("budget")
-        budget_str = f"{_fmt_int(budget)} ₽" if budget else "по договорённости"
+        complexity = o.get("complexity", "средняя")
         rv = o.get("roi")
-        roi_str = f" (~{_fmt_int(rv)} ₽/день)" if rv else ""
+        if budget:
+            roi_str = f" (~{_fmt_int(rv)} ₽/день)" if rv else ""
+            budget_str = f"{_fmt_int(budget)} ₽{roi_str}"
+        else:
+            est = suggest_price(demo, complexity)
+            budget_str = (f"по договорённости · оценка ~{_fmt_int(est)} ₽"
+                         if est else "по договорённости")
         resp = o.get("responses")
         resp_str = str(resp) if resp is not None else "—"
         demo_name = PROFILE["projects"][demo]["name"] if 0 <= demo < len(PROFILE["projects"]) else "—"
@@ -318,7 +325,8 @@ def run_cycle() -> int:
         text = (
             f"🆕 [{src}] «{demo_name}» · приоритет {int(o.get('priority', 0))}\n"
             f"{o.get('title')}\n"
-            f"💰 Бюджет: {budget_str}{roi_str}\n"
+            f"💰 Бюджет: {budget_str}\n"
+            f"🔧 Сложность через ИИ: {complexity}\n"
             f"📊 Откликов: {resp_str} · возраст {_fmt_age(o.get('age_hours'))} · шанс ~{int(o['win_prob'] * 100)}%\n"
             f"{verdict(o)}\n"
             f"🔗 {o.get('url')}\n"

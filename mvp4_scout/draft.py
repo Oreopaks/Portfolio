@@ -13,7 +13,11 @@ sys.path.insert(0, "/home/oleg/freelance-mvp")
 from shared.llm import chat
 
 PORTFOLIO_URL = "https://oreopaks.github.io/Portfolio/"
-BOT_DEMO_URL = "https://t.me/sdfghjklmvds_bot"
+BOT_DEMO_URL = "https://t.me/kryu_cafe_bot"     # MVP1 GPT-бот
+LEAD_DEMO_URL = "https://t.me/kryu_lead_bot"     # MVP2 автоматизация/lead
+RAG_DEMO_URL = "https://t.me/kryu_rag_bot"       # MVP3 RAG
+COPY_DEMO_URL = "https://t.me/kryu_copy_bot"     # MVP5 копирайтер
+SMM_DEMO_URL = "https://t.me/kryu_smm_bot"       # MVP6 SMM
 LANDING_DEMO_URL = "https://oreopaks.github.io/Portfolio/demo-landing/"
 
 # Профиль фрилансера: реальные ГОТОВЫЕ проекты с живыми демо.
@@ -35,13 +39,13 @@ PROFILE = {
             "name": "AI-автоматизация на n8n",
             "desc": "заявка с сайта/формы → авто-квалификация лида → CRM + уведомление менеджеру в Telegram",
             "ready": "готовый workflow",
-            "link": PORTFOLIO_URL,
+            "link": LEAD_DEMO_URL,
         },
         {
             "name": "RAG-ассистент по документам",
             "desc": "отвечает на вопросы по вашим PDF/регламентам со ссылкой на источник-цитату",
             "ready": "рабочий прототип с цитированием",
-            "link": PORTFOLIO_URL,
+            "link": RAG_DEMO_URL,
         },
         {
             "name": "Скаут заказов / парсинг",
@@ -53,13 +57,13 @@ PROFILE = {
             "name": "AI-копирайтер",
             "desc": "генерит SEO-тексты, описания товаров, продающие посты и email-рассылки под ваш бренд",
             "ready": "рабочий генератор текстов (4 формата)",
-            "link": PORTFOLIO_URL,
+            "link": COPY_DEMO_URL,
         },
         {
             "name": "AI-SMM-менеджер",
             "desc": "недельный контент-план + готовые посты под Telegram/VK/Instagram с рубриками и хэштегами",
             "ready": "рабочий генератор контент-плана и постов",
-            "link": PORTFOLIO_URL,
+            "link": SMM_DEMO_URL,
         },
         {
             "name": "Лендинги и веб-страницы",

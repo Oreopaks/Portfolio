@@ -25,6 +25,22 @@ DEFAULT_EFFORT_DAYS = 3.0
 # разработчика на РФ-бирже: ниже — ставка слабая, выше — хорошая.
 ROI_REF = 8000.0
 
+# Типичная цена проекта ПОХОЖЕГО типа (₽), для оценки когда бюджет не указан.
+# Якорь — цены карточек портфолио + анализ рынка (AI_MARKET_RESEARCH.md).
+# 0 бот, 1 автоматизация, 2 RAG, 3 парсинг.
+PRICE_BASE = {0: 20000, 1: 40000, 2: 65000, 3: 15000}
+# Сложность (из LLM-оценки) двигает цену вокруг типичной.
+COMPLEXITY_MULT = {"низкая": 0.6, "средняя": 1.0, "высокая": 1.6}
+
+
+def suggest_price(area: int, complexity: str | None = "средняя") -> int | None:
+    """Оценка цены по похожим проектам, когда бюджет не указан. None — вне профиля."""
+    base = PRICE_BASE.get(area)
+    if base is None:
+        return None
+    mult = COMPLEXITY_MULT.get((complexity or "средняя"), 1.0)
+    return int(round(base * mult / 1000.0)) * 1000  # округление до тысячи
+
 
 def parse_age_hours(s: str | None) -> float | None:
     """«19 часов 37 минут назад» / «2 дня назад» / «1 час назад» -> часы (float).
