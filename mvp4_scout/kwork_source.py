@@ -13,6 +13,7 @@ fetch_kwork(pages)    — боевая: ходит в сеть и зовёт par
 from __future__ import annotations
 import re
 import json
+import time
 from datetime import datetime
 
 from mvp4_scout.rank import ru_date_age_hours
@@ -134,10 +135,15 @@ def fetch_kwork(pages: int = 2) -> list[dict]:
         url = LISTING_URL + (f"?page={page}" if page > 1 else "")
         try:
             r = requests.get(url, headers={"User-Agent": _UA, "Accept-Language": "ru"}, timeout=40)
+            if r.status_code == 403:  # рейт-лимит — не долбим дальше, выходим с тем, что есть
+                print(f"[kwork] {url} -> HTTP 403 (рейт-лимит), стоп пагинации")
+                break
             if r.status_code != 200:
                 print(f"[kwork] {url} -> HTTP {r.status_code}")
                 continue
             out.extend(parse_kwork(r.text))
         except Exception as e:  # сеть может падать — не валим весь цикл
             print(f"[kwork] ошибка запроса {url}: {e}")
+        if page < pages:
+            time.sleep(1.2)  # вежливость: не триггерим анти-бот Kwork
     return out

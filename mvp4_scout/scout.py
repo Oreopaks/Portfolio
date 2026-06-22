@@ -56,7 +56,7 @@ KEYWORDS = [k.strip() for k in os.environ.get("SCOUT_KEYWORDS", _DEFAULT_KEYWORD
 MIN_BUDGET = int(os.environ.get("SCOUT_MIN_BUDGET", "10000"))
 # Какие биржи опрашивать (РФ-доступные, регистрация+отклик открыты): fl,kwork,weblancer.
 SOURCES = {s.strip() for s in os.environ.get("SCOUT_SOURCES", "fl,kwork,weblancer").split(",") if s.strip()}
-KWORK_PAGES = int(os.environ.get("SCOUT_KWORK_PAGES", "8"))           # ~12 заказов/стр, бюджет 100%
+KWORK_PAGES = int(os.environ.get("SCOUT_KWORK_PAGES", "4"))           # ~12 заказов/стр, бюджет 100% (4 стр — бережём от 403)
 WEBLANCER_PAGES = int(os.environ.get("SCOUT_WEBLANCER_PAGES", "4"))   # ~20 заказов/стр
 TG_CHANNELS = [c.strip() for c in os.environ.get("SCOUT_TG_CHANNELS", "").split(",") if c.strip()]
 
