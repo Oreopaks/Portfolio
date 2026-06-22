@@ -48,8 +48,19 @@ def test_package():
     print("OK package: пакет собран с контактом и зп")
 
 
+def test_refusal():
+    from mvp4_scout.outbound import _is_refusal
+    assert _is_refusal("К сожалению, генеративные языковые модели могут... "
+                       "временно ограничены. Благодарим за понимание.")
+    assert _is_refusal("ок")  # слишком короткий = подозрительно
+    assert not _is_refusal("Предлагаю автоматизировать обработку заявок через n8n и GPT. "
+                           "Окупаемость 1-2 месяца. Демо @kryu_lead_bot.")
+    print("OK refusal: отказ модели детектится, нормальный питч проходит")
+
+
 if __name__ == "__main__":
     test_parse()
     test_relevance()
     test_package()
+    test_refusal()
     print("OUTBOUND TESTS OK")

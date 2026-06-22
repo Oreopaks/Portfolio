@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -59,6 +60,20 @@ def _load_seen() -> set[str]:
 
 def _save_seen(seen: set[str]) -> None:
     SEEN_PATH.write_text(json.dumps(sorted(seen), ensure_ascii=False), encoding="utf-8")
+
+
+# GigaChat иногда отказывается (чувствит. тема/регион, напр. ДНР) и возвращает
+# отписку вместо питча. Такой пакет слать нельзя.
+_REFUSAL = re.compile(
+    r"генеративн\w+ языков|временно ограничен|благодарим за понимание"
+    r"|чувствительн\w+ тем|не мог[уы]\s+(?:ответить|помочь)|как языковая модель",
+    re.IGNORECASE,
+)
+
+
+def _is_refusal(pitch: str) -> bool:
+    p = (pitch or "").strip()
+    return len(p) < 40 or bool(_REFUSAL.search(p))
 
 
 def make_pitch(t: dict) -> str:
@@ -117,24 +132,28 @@ def cycle(send: bool = False, queries: list[str] | None = None, limit: int = MAX
     targets = fetch_targets(queries)
     seen = _load_seen()
     fresh = [t for t in targets if _relevant(t) and t["id"] not in seen]
-    # одна компания — один пакет за цикл (не дёргаем тот же бизнес дважды)
-    picked: list[dict] = []
+    # Один проход: компания-дедуп + пропуск отказов модели + добор до limit
+    # хороших пакетов (отказ не съедает слот).
     used_companies: set[str] = set()
+    out: list[dict] = []
+    skipped_refusal = 0
     for t in fresh:
+        if len(out) >= limit:
+            break
         key = (t.get("inn") or t.get("company") or "").strip().lower()
         if key and key in used_companies:
             continue
-        used_companies.add(key)
-        picked.append(t)
-        if len(picked) >= limit:
-            break
-    print(f"[outbound] цели: {len(targets)} -> релевантных новых: {len(fresh)} -> уник компаний, берём {len(picked)}")
-    out: list[dict] = []
-    for t in picked:
         try:
             pitch = make_pitch(t)
         except Exception as e:
             pitch = f"(питч не сгенерился: {e})"
+        if _is_refusal(pitch):
+            # модель отказалась (чувствит. тема/регион) — мёртвый таргет, не шлём и не ретраим
+            seen.add(t["id"])
+            used_companies.add(key)
+            skipped_refusal += 1
+            continue
+        used_companies.add(key)
         pkg = build_package(t, pitch)
         if send:
             if _send_tg(pkg):
@@ -142,6 +161,8 @@ def cycle(send: bool = False, queries: list[str] | None = None, limit: int = MAX
         else:
             print("\n" + "=" * 60 + "\n" + pkg)
         out.append({**t, "package": pkg})
+    print(f"[outbound] цели: {len(targets)} -> релевантных: {len(fresh)} -> "
+          f"отправлено {len(out)} (отказы модели пропущены: {skipped_refusal})")
     if send:
         _save_seen(seen)
         print(f"[outbound] отправлено и помечено seen: {len(out)}")
