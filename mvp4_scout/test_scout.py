@@ -241,7 +241,14 @@ def test_blacklist():
     assert _is_blacklisted({"title": "Пробив по номеру телефона", "desc": ""})
     # нормальный заказ — проходит
     assert not _is_blacklisted({"title": "Разработка Telegram-бота на GPT", "desc": "запись клиентов"})
-    print("ok blacklist: OSINT/накрутка отсеяны, нормальный заказ прошёл")
+    # не-AI домены (сайты/копирайт/дизайн/1С) без AI-сигнала — отсекаются
+    assert _is_blacklisted({"title": "Сделать лендинг на Тильде", "desc": ""})
+    assert _is_blacklisted({"title": "Настройка Битрикс 24", "desc": "доработать CRM"})
+    assert _is_blacklisted({"title": "Копирайтинг описаний товаров", "desc": ""})
+    # ...но AI-бот/RAG «для сайта» проходит (есть AI-сигнал)
+    assert not _is_blacklisted({"title": "Чат-бот на GPT для сайта", "desc": ""})
+    assert not _is_blacklisted({"title": "RAG-поиск по базе знаний", "desc": "лендинг с виджетом"})
+    print("ok blacklist: OSINT/накрутка/не-AI отсеяны, AI-заказы прошли")
 
 
 def test_make_draft():

@@ -46,13 +46,10 @@ SEEN_PATH = Path(__file__).resolve().parent / "seen.json"
 # парсинг) — широкая сеть на дешёвом префильтре; точный роутинг по области даёт
 # LLM в relevance.py. Совпадение — по началу слова (см. _kw_hit/keyword_strength).
 _DEFAULT_KEYWORDS = (
-    "бот,чат-бот,GPT,Telegram,ассистент,"            # область 0: GPT-боты
-    "автоматизаци,интеграци,n8n,zapier,make,webhook,CRM,рассылк,api,"  # 1: автоматизация
-    "rag,нейросет,база знаний,документ,"             # 2: RAG / поиск по документам
-    "парсинг,парсер,скрапинг,спарсить,мониторинг цен,"  # 3: парсинг / сбор данных
-    "текст,копирайт,статья,описани,контент,рерайт,наполнен,"  # 4: тексты / копирайт
-    "smm,соцсет,пост,контент-план,"                  # 5: SMM / соцсети
-    "лендинг,landing,посадочн,сайт"                  # 6: лендинги / простые сайты
+    "бот,чат-бот,GPT,чатгпт,gigachat,yandexgpt,нейросет,ии,llm,openai,ассистент,"  # боты / LLM
+    "rag,база знаний,эмбеддинг,векторн,документ,"     # RAG / поиск по документам
+    "автоматизаци,интеграци,n8n,zapier,make,webhook,парсинг,парсер,скрапинг,спарсить,"  # автоматизация
+    "агент,langchain,голосов,распознаван,компьютерн,ocr,анализ звонк"  # AI-агенты / voice / CV
 )
 KEYWORDS = [k.strip() for k in os.environ.get("SCOUT_KEYWORDS", _DEFAULT_KEYWORDS).split(",") if k.strip()]
 MIN_BUDGET = int(os.environ.get("SCOUT_MIN_BUDGET", "10000"))
@@ -88,8 +85,29 @@ _BLACKLIST = re.compile(
 )
 
 
+# Не-AI домены, которые пользователь НЕ берёт (сайты/копирайт/дизайн/SMM/1С-Битрикс).
+# Режем ТОЛЬКО если в заказе нет явного AI-сигнала — иначе «чат-бот для сайта» отсеялся бы.
+_NONAI = re.compile(
+    r"битрикс|\b1с\b|тильда|tilda|wordpress|вордпресс|лендинг|посадочн|верстк"
+    r"|\bseo\b|\bsmm\b|копирайт|рерайт|логотип|\bдизайн|инфографик|photoshop|фотошоп|модерац",
+    re.IGNORECASE,
+)
+_AICORE = re.compile(
+    r"gpt|gigachat|yandexgpt|deepseek|нейросет|нейронк|\bии\b|\bllm\b|openai|чат-?бот|gpt-?бот"
+    r"|\brag\b|база знаний|эмбеддинг|langchain|распознаван\w+ реч|компьютерн\w+ зрени"
+    r"|голосов\w+ (?:бот|ассистент)",
+    re.IGNORECASE,
+)
+
+
 def _is_blacklisted(o: dict) -> bool:
-    return bool(_BLACKLIST.search(f"{o.get('title','')} {o.get('desc','')}"))
+    text = f"{o.get('title','')} {o.get('desc','')}"
+    if _BLACKLIST.search(text):
+        return True
+    # не-AI домен (сайт/копирайт/дизайн) без AI-сигнала -> не наша ниша
+    if _NONAI.search(text) and not _AICORE.search(text):
+        return True
+    return False
 
 
 def _kw_hit(title: str, kws: list[str]) -> bool:
