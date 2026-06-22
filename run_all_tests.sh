@@ -10,6 +10,7 @@ for t in mvp1_gpt_bot/test_bot.py \
          mvp2_n8n_automation/test_reference.py \
          mvp3_rag/test_rag.py \
          mvp4_scout/test_scout.py \
+         mvp4_scout/test_outbound.py \
          mvp5_copywriter/test_copywriter.py \
          mvp6_smm/test_smm.py \
          demo_bot/test_showcase.py; do

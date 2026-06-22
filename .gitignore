@@ -11,5 +11,6 @@ mvp1_gpt_bot/bookings.csv
 # seen.json НЕ игнорим — его коммитит GitHub Actions скаута между запусками
 mvp4_scout/scout.log
 mvp4_scout/scout.lock
+mvp4_scout/seen_outbound.json
 mvp1_gpt_bot/bot.log
 graphify-out/
