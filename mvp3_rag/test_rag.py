@@ -2,8 +2,14 @@
 Офлайн-тесты MVP3 (без сети, без ключей: LLM=mock, эмбеддинги локальные).
 Запуск: cd /home/oleg/freelance-mvp && .venv/bin/python mvp3_rag/test_rag.py
 """
+import os
 import sys
 sys.path.insert(0, "/home/oleg/freelance-mvp")
+
+# Ядро тестов гоняем на детерминированном TF-IDF (без сети/модели). Dense-путь
+# проверяется отдельным guarded-тестом ниже. ВАЖНО: задать ДО импорта rag —
+# rag._DENSE вычисляется на импорте.
+os.environ["RAG_BACKEND"] = "tfidf"
 
 from pathlib import Path
 
@@ -64,9 +70,27 @@ def test_persistence():
     print("OK persistence")
 
 
+def test_dense_embedder_optional():
+    """Семантика dense-эмбеддера: близкий по смыслу, но без общих слов, ближе
+    нерелевантного. Пропускается, если fastembed/модель недоступны (офлайн/CI)."""
+    try:
+        from mvp3_rag.embedder import DenseEmbedder, dense_cosine
+        emb = DenseEmbedder()
+        q = emb.embed("сколько суток на отказ от покупки")
+        rel = emb.embed("возврат товара возможен в течение 14 дней")
+        irr = emb.embed("доставка курьером по городу завтра")
+    except Exception as e:  # нет fastembed или модель не качается — не блокируем оффлайн-прогон
+        print(f"SKIP dense (нет fastembed/модели): {type(e).__name__}")
+        return
+    assert dense_cosine(q, rel) > dense_cosine(q, irr), "семантически близкий должен быть ближе"
+    assert len(q) == DenseEmbedder.DIM
+    print("OK dense embedder (семантика без общих слов)")
+
+
 if __name__ == "__main__":
     test_embedder_basics()
     test_chunking()
     test_retrieval_and_answer()
     test_persistence()
+    test_dense_embedder_optional()
     print("MVP3 TESTS OK")

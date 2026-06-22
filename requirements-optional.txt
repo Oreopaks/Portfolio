@@ -1,2 +1,4 @@
 # Опционально, только для боевого режима отдельных MVP.
 telethon>=1.34      # mvp4_scout: чтение Telegram-каналов (нужны api_id/api_hash)
+fastembed>=0.3      # mvp3_rag: плотные RU-эмбеддинги (ONNX, без torch). RAG_BACKEND=dense.
+                    # Без него RAG падает на TF-IDF (RAG_BACKEND=tfidf, офлайн-фолбэк).

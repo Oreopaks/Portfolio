@@ -93,19 +93,44 @@ def cosine(a: Dict[str, float], b: Dict[str, float]) -> float:
     return dot / (na * nb)
 
 
-class ApiEmbedder:
+def dense_cosine(a: List[float], b: List[float]) -> float:
+    """Косинус двух плотных векторов (list[float])."""
+    if not a or not b:
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    if na == 0 or nb == 0:
+        return 0.0
+    return dot / (na * nb)
+
+
+class DenseEmbedder:
     """
-    Заглушка под боевой эмбеддер по HTTP. Не используется в офлайн-тестах.
-    Реализовать при необходимости (например, через requests к провайдеру).
+    Плотные мультиязычные эмбеддинги через fastembed (ONNX, без torch).
+    Модель paraphrase-multilingual-MiniLM-L12-v2 (dim=384) понимает русский ПО СМЫСЛУ:
+    находит «возврат 14 дней» по запросу «сколько дней на отказ от покупки», чего
+    TF-IDF (пересечение слов) не умеет. Скачивается один раз (~220 МБ), дальше офлайн.
+
+    Модель — синглтон на класс: все боты в supervisor делят один инстанс в памяти.
     """
 
-    def __init__(self, model: str = "api") -> None:
-        self.model = model
+    MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    DIM = 384
+    _model = None  # type: ignore[var-annotated]
 
-    def fit(self, corpus: Iterable[str]) -> "ApiEmbedder":  # noqa: D401
+    @classmethod
+    def _get(cls):
+        if cls._model is None:
+            from fastembed import TextEmbedding  # тяжёлый импорт — только при первом вызове
+            cls._model = TextEmbedding(model_name=cls.MODEL)
+        return cls._model
+
+    def fit(self, corpus: Iterable[str]) -> "DenseEmbedder":  # для совместимости интерфейса
         return self
 
-    def embed(self, text: str):  # pragma: no cover - заглушка
-        raise NotImplementedError(
-            "ApiEmbedder не реализован: подключите боевой провайдер эмбеддингов."
-        )
+    def embed(self, text: str) -> List[float]:
+        return [float(x) for x in next(self._get().embed([text or ""]))]
+
+    def embed_many(self, texts: List[str]) -> List[List[float]]:
+        return [[float(x) for x in v] for v in self._get().embed(list(texts))]

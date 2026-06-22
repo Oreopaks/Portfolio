@@ -19,11 +19,20 @@ sys.path.insert(0, "/home/oleg/freelance-mvp")
 import shared.config  # noqa: F401  подхватывает .env при импорте
 from shared.llm import chat
 
-from mvp3_rag.embedder import LocalEmbedder, cosine
+import importlib.util
+
+from mvp3_rag.embedder import LocalEmbedder, DenseEmbedder, cosine, dense_cosine
 
 INDEX_PATH = Path(__file__).resolve().parent / "rag_index.json"
 
 SYSTEM_PROMPT = "Отвечай ТОЛЬКО по контексту, добавляй ссылку на источник"
+
+# Бэкенд эмбеддингов: dense (fastembed, семантика) по умолчанию; tfidf — фолбэк
+# для офлайна/CI и если fastembed не установлен. Переключается RAG_BACKEND=tfidf.
+_DENSE = (
+    os.environ.get("RAG_BACKEND", "dense").lower() != "tfidf"
+    and importlib.util.find_spec("fastembed") is not None
+)
 
 # индекс в памяти процесса
 _INDEX: Dict | None = None
@@ -84,16 +93,23 @@ def build_index(docs: List[Tuple[str, str]]) -> Dict:
         for ch in chunk_text(text):
             all_chunks.append({"doc": doc_name, "chunk": ch})
 
-    embedder = LocalEmbedder().fit([c["chunk"] for c in all_chunks])
-    for c in all_chunks:
-        c["vector"] = _serialize_vec(embedder.embed(c["chunk"]))
-
-    index = {
-        "version": 1,
-        "idf": {k: round(v, 6) for k, v in embedder.idf.items()},
-        "n_docs": embedder.n_docs,
-        "chunks": all_chunks,
-    }
+    if _DENSE:
+        emb = DenseEmbedder()
+        vecs = emb.embed_many([c["chunk"] for c in all_chunks]) if all_chunks else []
+        for c, v in zip(all_chunks, vecs):
+            c["vector"] = v
+        index = {"version": 2, "backend": "dense", "dim": DenseEmbedder.DIM, "chunks": all_chunks}
+    else:
+        embedder = LocalEmbedder().fit([c["chunk"] for c in all_chunks])
+        for c in all_chunks:
+            c["vector"] = _serialize_vec(embedder.embed(c["chunk"]))
+        index = {
+            "version": 2,
+            "backend": "tfidf",
+            "idf": {k: round(v, 6) for k, v in embedder.idf.items()},
+            "n_docs": embedder.n_docs,
+            "chunks": all_chunks,
+        }
     _save_index(index)
     global _INDEX
     _INDEX = index
@@ -154,12 +170,16 @@ def search(query: str, k: int = 3) -> List[Dict]:
     index = load_index()
     if not index or not index.get("chunks"):
         return []
-    emb = _embedder_from_index(index)
-    qvec = emb.embed(query)
     scored: List[Dict] = []
-    for c in index["chunks"]:
-        score = cosine(qvec, c["vector"])
-        scored.append({"doc": c["doc"], "chunk": c["chunk"], "score": score})
+    if index.get("backend") == "dense":
+        qvec = DenseEmbedder().embed(query)
+        for c in index["chunks"]:
+            scored.append({"doc": c["doc"], "chunk": c["chunk"], "score": dense_cosine(qvec, c["vector"])})
+    else:
+        emb = _embedder_from_index(index)
+        qvec = emb.embed(query)
+        for c in index["chunks"]:
+            scored.append({"doc": c["doc"], "chunk": c["chunk"], "score": cosine(qvec, c["vector"])})
     scored.sort(key=lambda x: x["score"], reverse=True)
     return scored[:k]
 
