@@ -14,3 +14,8 @@ mvp4_scout/scout.lock
 mvp4_scout/seen_outbound.json
 mvp1_gpt_bot/bot.log
 graphify-out/
+# mvp7_price_scout: рантайм-данные (БД-срез цен, сессия IG) — не в репо
+mvp7_price_scout/prices.db
+mvp7_price_scout/prices.db-wal
+mvp7_price_scout/prices.db-shm
+mvp7_price_scout/ig_session.json
