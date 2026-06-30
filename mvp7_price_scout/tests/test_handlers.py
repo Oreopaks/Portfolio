@@ -74,3 +74,22 @@ def test_html_escape_user_query_echo(tmp_path):
     conn, _ = _seed(tmp_path)
     out = handlers.handle_text(conn, "<b>zzz несуществующий", False)
     assert "&lt;b&gt;" in out and "<b>" not in out
+
+
+def test_render_dedups_identical_competitor_rows(tmp_path):
+    """Разные SKU одного магазина по одной цене (аксессуары без объёма) — одна строка."""
+    conn = store.connect(tmp_path / "p.db")
+    base = Product(shop="di-park", title="Наушники Marshall Major V", price=7790,
+                   source_type="base", url="u", fetched_at="2026-06-29T16:00:00")
+    store.replace_shop(conn, "di-park", [base])
+    store.link_base_self(conn)
+    bid = store.base_catalog(conn)[0]["id"]
+    dups = [Product(shop="sr57", title="Marshall Major V Black", price=7490),
+            Product(shop="sr57", title="Marshall Major V Brown", price=7490),
+            Product(shop="sr57", title="Marshall Major V Cream", price=8490)]
+    for c in dups:
+        c.dipark_id = bid
+    store.replace_shop(conn, "sr57", dups)
+    out = handlers.render_comparison(conn, store.base_by_id(conn, bid))
+    assert out.count("7 490 ₽") == 1          # дубль 7490 схлопнут
+    assert "8 490 ₽" in out                    # отличная цена осталась

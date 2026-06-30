@@ -107,10 +107,28 @@ def find_product(conn, query: str, min_score: int = 55) -> dict | None:
     return best
 
 
+def _dedup_comps(comps: list[dict]) -> list[dict]:
+    """Схлопнуть строки конкурента с одинаковыми (магазин, тип, цена).
+
+    Разные SKU одного магазина по одной цене визуально дублируются: аксессуары
+    без объёма памяти (наушники и т.п.) матчатся несколькими model_key к одному
+    товару di-park. Для показа это шум — оставляем уникальные. Порядок сохраняем.
+    """
+    seen: set[tuple] = set()
+    out: list[dict] = []
+    for c in comps:
+        key = (c["shop"], c["source_type"], c["price"])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(c)
+    return out
+
+
 def render_comparison(conn, base_row: dict) -> str:
     """Понятная карточка владельцу: вердикт + кто дешевле/дороже тебя + что сделать."""
     our = base_row["price"]
-    comps = store.competitors_for(conn, base_row["id"])
+    comps = _dedup_comps(store.competitors_for(conn, base_row["id"]))
     lines = [f"📱 {_esc(_short_title(base_row['title']))}"]
     lines.append(f"💰 Твоя цена: {fmt_int(our)} ₽" if our else "💰 Твоя цена: под заказ")
 
