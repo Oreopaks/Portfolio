@@ -10,15 +10,27 @@ import html
 import re
 import subprocess
 import sys
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from rapidfuzz import fuzz
 
 from mvp7_price_scout import store
-from mvp7_price_scout.normalize import model_key
+from mvp7_price_scout.normalize import model_key, color_of, family_title
 
 ROOT = str(Path(__file__).resolve().parents[1])   # корень репо (freelance-mvp)
+
+
+@dataclass
+class Reply:
+    """Ответ бота: текст + опциональные inline-кнопки [(подпись, callback_data)].
+
+    callback_data всегда «p:{id}» — тап по любой кнопке открывает карточку товара
+    с этим id (подсказка-семья ИЛИ другой цвет). bot.py строит reply_markup.
+    """
+    text: str
+    buttons: list | None = None
 
 SHOP_LABEL = {
     "sr57": "sr57.ru", "repremium": "repremium", "iprice": "iprice",
@@ -78,17 +90,66 @@ def _label(shop: str, source_type: str) -> str:
 
 
 def _short_title(title: str) -> str:
-    """Убрать шум для показа: (Sim+E-Sim), лишние пробелы, префикс Apple."""
+    """Убрать шум для показа: (Sim+E-Sim), лишние пробелы, префикс Apple.
+
+    Цвет ОСТАВЛЯЕМ: каталог хранится per-color и цена за цвет точная — показать
+    «iPhone 17 Pro 256Gb Deep Blue» корректно (см. find_product / color_of).
+    """
     t = re.sub(r"\([^)]*\)", "", title or "")
     t = re.sub(r"^\s*Apple\s+", "", t, flags=re.I)     # «Apple iPhone» -> «iPhone»
     return re.sub(r"\s+", " ", t).strip()
 
 
-def find_product(conn, query: str, min_score: int = 55) -> dict | None:
-    """Найти лучший товар эталона под запрос (покрытие токенов запроса, затем fuzzy).
+# Цвет в запросе RU -> EN (каталог di-park называет цвета по-английски).
+_COLOR_RU = {
+    "чёрный": "black", "черный": "black", "белый": "white", "синий": "blue",
+    "голубой": "blue", "красный": "red", "зелёный": "green", "зеленый": "green",
+    "жёлтый": "yellow", "желтый": "yellow", "серый": "gray", "серебристый": "silver",
+    "серебро": "silver", "золотой": "gold", "золото": "gold", "фиолетовый": "purple",
+    "розовый": "pink", "оранжевый": "orange", "титановый": "titanium", "титан": "titanium",
+    "бирюзовый": "teal", "графит": "graphite", "графитовый": "graphite",
+}
 
-    Ранжируем по доле токенов запроса, найденных в товаре, потом по
-    token_sort_ratio — иначе короткий «galaxy s24» цепляет чехол «Pitaka S24».
+
+def _query_colors(query: str, vocab: set) -> set:
+    """Цвет(а) из запроса -> EN-токены для сопоставления с цветом каталога.
+
+    Цвет = буквенный токен, которого нет в модель-словаре каталога (vocab). RU
+    переводим в EN (синий->blue), чтобы найти «Deep Blue».
+    """
+    out: set = set()
+    for w in re.sub(r"[^\w]+", " ", query.lower().replace("ё", "е"), flags=re.UNICODE).split():
+        w = _COLOR_RU.get(w, w)
+        if len(w) > 1 and not any(c.isdigit() for c in w) and w not in vocab:
+            out.add(w)
+    return out
+
+
+def _qtokens(qk: str, vocab: set) -> set:
+    """Значимые токены запроса для сопоставления с каталогом.
+
+    Голое число объёма приводим к каталожной форме: «256» -> «256gb» (иначе
+    покрытие не различало бы 256 и 512 — они не пинили семью). Прочее держим,
+    если это токен каталога или цифросодержащее (модель). Буквенный шум (цвет)
+    отсекается — он не в vocab.
+    """
+    out: set = set()
+    for t in qk.split():
+        if t.isdigit() and (t + "gb") in vocab:
+            out.add(t + "gb")                          # 256 -> 256gb (объём)
+        elif t in vocab or any(c.isdigit() for c in t):
+            out.add(t)
+    return out or set(qk.split())                      # запрос — только цвет/шум: не теряем
+
+
+def find_product(conn, query: str, min_score: int = 55) -> dict | None:
+    """Найти товар эталона под запрос: лучшая семья модель+объём, затем нужный цвет.
+
+    Ранжируем по доле токенов запроса в товаре, потом token_sort_ratio — иначе
+    короткий «galaxy s24» цепляет чехол «Pitaka S24». Цвет/шум (буквенные токены
+    вне словаря каталога) на поиск семьи не влияют. Затем внутри семьи выбираем
+    строку запрошенного цвета (каталог per-color, цена за цвет точная); если цвет
+    не указан или не найден — берём самый дешёвый цвет.
     """
     qk = model_key(query)
     if not qk:
@@ -96,15 +157,105 @@ def find_product(conn, query: str, min_score: int = 55) -> dict | None:
     cands = store.search_base(conn, qk)
     if not cands:
         return None
-    qtok = set(qk.split())
+    vocab = set().union(*(set(r["model_key"].split()) for r in cands))
+    qtok = _qtokens(qk, vocab)
+    ekey = " ".join(sorted(qtok))
 
     def coverage(r: dict) -> float:
         return len(qtok & set(r["model_key"].split())) / len(qtok) if qtok else 0.0
 
-    best = max(cands, key=lambda r: (coverage(r), fuzz.token_sort_ratio(qk, r["model_key"])))
-    if coverage(best) < 0.5 or fuzz.token_sort_ratio(qk, best["model_key"]) < min_score:
+    best = max(cands, key=lambda r: (coverage(r), fuzz.token_sort_ratio(ekey, r["model_key"])))
+    if coverage(best) < 0.5 or fuzz.token_sort_ratio(ekey, best["model_key"]) < min_score:
         return None
-    return best
+
+    fam = [r for r in cands
+           if r["model_key"] == best["model_key"] and r["storage"] == best["storage"]]
+    want = _query_colors(query, vocab)
+    if want:
+        picked = [r for r in fam if want & set((color_of(r["title"]) or "").split())]
+        if picked:
+            fam = picked
+    return min(fam, key=lambda r: (r["price"] is None, r["price"] or 0))
+
+
+def _cheapest_row(rows: list[dict]) -> dict:
+    return min(rows, key=lambda r: (r["price"] is None, r["price"] or 0))
+
+
+def _fam_label(title: str) -> str:
+    """Подпись кнопки-семьи: без цвета, без (Sim+E-Sim), без Apple-префикса."""
+    t = re.sub(r"\([^)]*\)", "", family_title(title))
+    t = re.sub(r"^\s*Apple\s+", "", t, flags=re.I)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def search_suggestions(conn, query: str, limit: int = 8, min_score: int = 45) -> list[dict]:
+    """Ранжированные подсказки-СЕМЬИ (модель+объём) под свободный запрос.
+
+    Пользователь пишет названия по-разному — вместо тупика «не нашёл» отдаём
+    список ближайших товаров. Группируем по (model_key, storage): одна кнопка на
+    семью, представитель — запрошенный цвет (если указан) либо самый дешёвый.
+    Возвращаем [{id, label, price, score}] отсортированно по релевантности.
+    """
+    qk = model_key(query)
+    if not qk:
+        return []
+    cands = store.search_base(conn, qk)
+    if not cands:
+        return []
+    vocab = set().union(*(set(r["model_key"].split()) for r in cands))
+    qtok = _qtokens(qk, vocab)
+    ekey = " ".join(sorted(qtok))
+    want = _query_colors(query, vocab)
+
+    def score(r: dict) -> tuple:
+        cov = len(qtok & set(r["model_key"].split())) / len(qtok) if qtok else 0.0
+        return (cov, fuzz.token_sort_ratio(ekey, r["model_key"]))
+
+    fams: dict[tuple, list[dict]] = {}
+    for r in cands:
+        fams.setdefault((r["model_key"], r["storage"]), []).append(r)
+
+    out: list[dict] = []
+    for rows in fams.values():
+        sc = max(score(r) for r in rows)
+        if sc[0] < 0.5 or sc[1] < min_score:
+            continue
+        colored = [r for r in rows if want & set((color_of(r["title"]) or "").split())] if want else []
+        rep = _cheapest_row(colored or rows)
+        if colored:                                    # запрошенный цвет найден — подпись с цветом
+            label = f"{_short_title(rep['title'])} — {fmt_int(rep['price'])} ₽"
+        else:
+            prices = [r["price"] for r in rows if r["price"] is not None]
+            tail = f" — от {fmt_int(min(prices))} ₽" if prices else ""
+            label = _fam_label(rep["title"]) + tail
+        out.append({"id": rep["id"], "label": label, "price": rep["price"], "score": sc})
+
+    if not out:
+        return []
+    # сначала по покрытию, затем дешёвые (для покупателя нагляднее), затем fuzz
+    out.sort(key=lambda x: (-x["score"][0],
+                            x["price"] if x["price"] is not None else 10 ** 9,
+                            -x["score"][1]))
+    topcov = out[0]["score"][0]
+    out = [s for s in out if s["score"][0] == topcov]   # только верхний слой покрытия (без 16/14 под «17»)
+    return out[:limit]
+
+
+def _variant_buttons(conn, base_row: dict) -> list:
+    """Кнопки других цветов той же семьи (у каждого своя цена) — per-color выбор.
+
+    Только цвета С ценой (None-цена как кнопка бесполезна), по одному на цвет.
+    """
+    btns = []
+    seen: set = set()
+    for r in store.family_colors(conn, base_row):
+        col = (color_of(r["title"]) or "вариант").title()
+        if r["id"] == base_row["id"] or r["price"] is None or col in seen:
+            continue
+        seen.add(col)
+        btns.append((f"{col} — {fmt_int(r['price'])} ₽", f"p:{r['id']}"))
+    return btns[:6]
 
 
 def _dedup_comps(comps: list[dict]) -> list[dict]:
@@ -128,7 +279,7 @@ def _dedup_comps(comps: list[dict]) -> list[dict]:
 def render_comparison(conn, base_row: dict) -> str:
     """Понятная карточка владельцу: вердикт + кто дешевле/дороже тебя + что сделать."""
     our = base_row["price"]
-    comps = _dedup_comps(store.competitors_for(conn, base_row["id"]))
+    comps = _dedup_comps(store.competitors_for(conn, base_row))
     lines = [f"📱 {_esc(_short_title(base_row['title']))}"]
     lines.append(f"💰 Твоя цена: {fmt_int(our)} ₽" if our else "💰 Твоя цена: под заказ")
 
@@ -327,29 +478,72 @@ def trigger_heavy_refresh() -> None:
     )
 
 
-def handle_text(conn, text: str, is_admin: bool) -> str:
-    """Роутер: команда или запрос товара -> текст ответа (HTML parse_mode)."""
+def _product_reply(conn, base_row: dict) -> Reply:
+    """Карточка товара + кнопки других цветов семьи (per-color выбор в один тап)."""
+    return Reply(render_comparison(conn, base_row), _variant_buttons(conn, base_row))
+
+
+def _query_has_storage(conn, query: str) -> bool:
+    """Указан ли в запросе объём («256»/«1tb») — тогда семья определяется однозначно."""
+    qk = model_key(query)
+    if not qk:
+        return False
+    cands = store.search_base(conn, qk)
+    if not cands:
+        return False
+    vocab = set().union(*(set(r["model_key"].split()) for r in cands))
+    return any(t.endswith(("gb", "tb")) for t in _qtokens(qk, vocab))
+
+
+def handle_text(conn, text: str, is_admin: bool) -> Reply:
+    """Роутер: команда или запрос товара -> Reply (текст + опц. кнопки).
+
+    Запрос товара: если одна семья доминирует (выше по покрытию токенов) —
+    сразу карточка нужного цвета + кнопки других цветов. Если несколько семей
+    равнозначны (свободный/короткий запрос) — список подсказок-кнопок, чтобы не
+    гадать за пользователя (он пишет названия по-разному).
+    """
     text = (text or "").strip()
     low = text.lower()
 
     if low in ("/start", "/help", "start", "help", "помощь"):
-        return HELP
+        return Reply(HELP)
     if low.startswith("/top"):
-        return render_top(conn)
+        return Reply(render_top(conn))
     if low.startswith("/stats"):
-        return render_stats(conn)
+        return Reply(render_stats(conn))
     if low.startswith("/refresh"):
         if not is_admin:
-            return "Команда /refresh доступна только администратору."
+            return Reply("Команда /refresh доступна только администратору.")
         trigger_heavy_refresh()
-        return "🔄 Запустил обновление цен конкурентов. Минуту-другую — потом просто спроси товар."
+        return Reply("🔄 Запустил обновление цен конкурентов. Минуту-другую — потом просто спроси товар.")
     if text.startswith("/"):
-        return "Неизвестная команда. /help — список."
+        return Reply("Неизвестная команда. /help — список.")
 
     if len(low) < 2:
-        return "Напиши название товара, например: <code>iphone 17 256</code>"
-    product = find_product(conn, text)
-    if not product:
-        return (f"Не нашёл «{_esc(text)}» в каталоге Di-Park.\n"
-                "Попробуй точнее: модель + объём, напр. <code>iphone 16 pro 256</code>.")
-    return render_comparison(conn, product)
+        return Reply("Напиши название товара, например: <code>iphone 17 256</code>")
+
+    sugg = search_suggestions(conn, text)
+    if not sugg:
+        return Reply(f"Не нашёл «{_esc(text)}» в каталоге Di-Park.\n"
+                     "Попробуй короче: модель + объём, напр. <code>iphone 16 pro 256</code>.")
+    # объём указан (или семья одна) -> сразу карточка нужного цвета; иначе список подсказок
+    # (объём — ось, которую чаще всего недописывают: «17 pro» -> выбор 128/256/512)
+    if len(sugg) == 1 or _query_has_storage(conn, text):
+        product = find_product(conn, text) or store.base_by_id(conn, sugg[0]["id"])
+        if product:
+            return _product_reply(conn, product)
+    buttons = [(s["label"], f"p:{s['id']}") for s in sugg]
+    return Reply(f"Уточни, что именно (нашёл {len(sugg)} под «{_esc(text)}»):", buttons)
+
+
+def handle_callback(conn, data: str) -> Reply | None:
+    """Тап по inline-кнопке «p:{id}» -> карточка выбранного товара (+ цвета семьи)."""
+    if not data or not data.startswith("p:"):
+        return None
+    try:
+        pid = int(data[2:])
+    except ValueError:
+        return None
+    row = store.base_by_id(conn, pid)
+    return _product_reply(conn, row) if row else None

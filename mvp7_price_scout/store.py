@@ -16,7 +16,7 @@ import os
 import sqlite3
 from pathlib import Path
 
-from mvp7_price_scout.normalize import Product
+from mvp7_price_scout.normalize import Product, sim_type_of
 
 DEFAULT_DB = Path(__file__).resolve().parent / "prices.db"
 
@@ -118,15 +118,50 @@ def search_base(conn: sqlite3.Connection, query_key: str, limit: int = 40) -> li
     return [dict(r) for r in cur.fetchall()]
 
 
-def competitors_for(conn: sqlite3.Connection, dipark_id: int) -> list[dict]:
-    """Все строки конкурентов, привязанные к эталонному товару (без base)."""
+def competitors_for(conn: sqlite3.Connection, base_row: dict) -> list[dict]:
+    """Конкуренты товара — по СЕМЬЕ цветов (модель+объём+совместимый SIM).
+
+    Наш каталог хранится per-color (цена по цвету различается), а у конкурентов
+    цвета названы вразнобой (Midnight/Black/Чёрный) — построчно по цвету не
+    сматчить. Поэтому: берём все цветовые строки эталона этой семьи (тот же
+    model_key+storage, совместимый SIM) и собираем конкурентов, привязанных
+    матчером (dipark_id) к ЛЮБОЙ из них. Так для любого запрошенного цвета видны
+    все конкуренты семьи, и сохраняется фаззи-привязка матчера (аксессуары и т.п.).
+    """
+    fam = conn.execute(
+        "SELECT id, title FROM products "
+        "WHERE source_type = 'base' AND model_key = ? AND storage IS ?",
+        (base_row["model_key"], base_row["storage"]),
+    ).fetchall()
+    bsim = sim_type_of(base_row["title"])
+    ids = [r["id"] for r in fam
+           if bsim is None or sim_type_of(r["title"]) is None or sim_type_of(r["title"]) == bsim]
+    if not ids:
+        ids = [base_row["id"]]
+    placeholders = ",".join("?" * len(ids))
     cur = conn.execute(
-        "SELECT shop, title, price, url, in_stock, source_type, fetched_at "
-        "FROM products WHERE dipark_id = ? AND source_type != 'base' "
-        "ORDER BY (price IS NULL), price",
-        (dipark_id,),
+        f"SELECT shop, title, price, url, in_stock, source_type, fetched_at "
+        f"FROM products WHERE source_type != 'base' AND dipark_id IN ({placeholders}) "
+        f"ORDER BY (price IS NULL), price",
+        ids,
     )
     return [dict(r) for r in cur.fetchall()]
+
+
+def family_colors(conn: sqlite3.Connection, base_row: dict) -> list[dict]:
+    """Цветовые варианты эталона той же семьи (модель+объём, тот же тип SIM).
+
+    Каталог per-color: у каждого цвета своя цена. Для кнопок «другие цвета» на
+    карточке. SIM берём строго тот же (eSIM и Sim+E-Sim — разные семьи по цене).
+    """
+    cur = conn.execute(
+        "SELECT id, title, price FROM products "
+        "WHERE source_type = 'base' AND model_key = ? AND storage IS ? "
+        "ORDER BY (price IS NULL), price",
+        (base_row["model_key"], base_row["storage"]),
+    )
+    bsim = sim_type_of(base_row["title"])
+    return [dict(r) for r in cur.fetchall() if sim_type_of(r["title"]) == bsim]
 
 
 def base_by_id(conn: sqlite3.Connection, dipark_id: int) -> dict | None:

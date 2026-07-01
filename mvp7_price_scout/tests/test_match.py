@@ -75,6 +75,41 @@ def test_no_match_unknown_product():
     assert match_one(p, idx)[0] is None
 
 
+def test_sim_guard_separates_esim_from_physical():
+    """eSIM-only конкурента НЕ матчится к Sim+E-Sim эталону (разные SKU/цены)."""
+    rows = [{"id": 10, "title": "Apple iPhone 17 256Gb (Sim+E-Sim)",
+             "model_key": model_key("Apple iPhone 17 256Gb (Sim+E-Sim)"),
+             "storage": "256gb", "price": 150000}]
+    idx = build_index(rows)
+    p = Product(shop="x", title="iPhone 17 256Gb eSIM", price=130000)
+    assert match_one(p, idx)[0] is None
+
+
+def test_sim_guard_soft_when_competitor_unknown():
+    """Конкурент без пометки SIM матчится как раньше (мягкий guard)."""
+    rows = [{"id": 11, "title": "Apple iPhone 17 256Gb (Sim+E-Sim)",
+             "model_key": model_key("Apple iPhone 17 256Gb (Sim+E-Sim)"),
+             "storage": "256gb", "price": 150000}]
+    idx = build_index(rows)
+    p = Product(shop="x", title="iPhone 17 256GB", price=145000)   # SIM не указан
+    assert match_one(p, idx)[0] == 11
+
+
+def test_sim_guard_picks_matching_base_variant():
+    """В эталоне обе версии (один model_key) — eSIM-конкурент идёт к eSIM-эталону."""
+    rows = [
+        {"id": 12, "title": "Apple iPhone 17 256Gb (Sim+E-Sim)",
+         "model_key": model_key("Apple iPhone 17 256Gb (Sim+E-Sim)"),
+         "storage": "256gb", "price": 150000},
+        {"id": 13, "title": "Apple iPhone 17 256Gb eSIM",
+         "model_key": model_key("Apple iPhone 17 256Gb eSIM"),
+         "storage": "256gb", "price": 135000},
+    ]
+    idx = build_index(rows)
+    p = Product(shop="x", title="iPhone 17 256Gb eSIM", price=130000)
+    assert match_one(p, idx)[0] == 13
+
+
 def test_match_all_sets_dipark_id():
     rows = _base()
     prods = [

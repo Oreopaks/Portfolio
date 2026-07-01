@@ -33,6 +33,8 @@ class Product:
     source_type: str = "site"       # base | site | yandex | ig | ig_ocr
     model_key: str = ""             # канон для сравнения (см. model_key())
     storage: str | None = None      # "256gb"/"1tb" — признак для guard'а матчинга
+    sim_type: str | None = None     # "esim"/"physical"/None — guard матчинга (см. sim_type_of)
+    color: str | None = None        # канон цвета (см. color_of) — для per-color цены нашего каталога
     fetched_at: str = ""            # ISO-время сбора (ставит collector)
     dipark_id: int | None = None    # id товара-эталона, к которому привязан
 
@@ -41,6 +43,10 @@ class Product:
             self.model_key = model_key(self.title)
         if self.storage is None:
             self.storage = storage_of(self.title)
+        if self.sim_type is None:
+            self.sim_type = sim_type_of(self.title)
+        if self.color is None:
+            self.color = color_of(self.title)
 
 
 # --- словарь мусора: слова, которые НЕ различают товар и только мешают матчу ---
@@ -92,6 +98,27 @@ def storage_of(title: str) -> str | None:
     if gbs:
         return f"{max(gbs)}gb"            # несколько GB (RAM+ROM) -> ROM = максимум
     return None
+
+
+# Тип SIM. eSIM-only (глобал/импорт) и физическая+eSIM («Sim+E-Sim», ЕАС) —
+# РАЗНЫЕ SKU/рынки с разной ценой, поэтому различаем при матчинге (мягкий guard
+# в match.py). Из model_key sim по-прежнему выкинут — это отдельный признак.
+_ESIM_RE = re.compile(r"e[\s\-_]?sim", re.I)
+_PHYS_SIM_RE = re.compile(r"\bsim\b|nano[\s\-]?sim|\bdual\b|двойн|две\s*sim|2\s*sim|физическ", re.I)
+
+
+def sim_type_of(title: str) -> str | None:
+    """Тип SIM из названия: "esim" / "physical" / None (не указан).
+
+    "physical" = есть физическая симка (вкл. "Sim+E-Sim"); "esim" = только eSIM.
+    Сначала вычитаем вхождения e-sim, чтобы остаток выдал именно физическую SIM
+    (иначе "Sim+E-Sim" дал бы ложный esim-only по слову "esim").
+    """
+    s = unicodedata.normalize("NFKC", title or "").lower().replace("ё", "е")
+    has_esim = bool(_ESIM_RE.search(s))
+    if _PHYS_SIM_RE.search(_ESIM_RE.sub(" ", s)):
+        return "physical"
+    return "esim" if has_esim else None
 
 
 # Кириллица брендов -> латиница (чтобы RU-запрос «айфон 17» нашёл «iPhone 17»).
@@ -150,14 +177,17 @@ def model_key(title: str) -> str:
 def collapse_variants(products: list[Product]) -> list[Product]:
     """Схлопнуть цвет-варианты одного товара (один model_key) в одну запись.
 
-    Магазины дробят товар на цвета с одной ценой за объём (часть «под заказ»
-    без цены). Берём представителя с минимальной известной ценой; in_stock —
-    True, если в наличии хоть один вариант. Так на сравнение идёт одна цена за
-    (модель+объём), а не 6 одинаковых строк.
+    Схлопываем только ИСТИННЫЕ дубли — одинаковые (модель+объём+SIM+цвет),
+    дублирующиеся по SKU/наличию. Берём представителя с минимальной известной
+    ценой; in_stock — True, если в наличии хоть один вариант.
+
+    Группа = (model_key, sim_type, color). Цвет и SIM не схлопываем: у этого
+    каталога цена по цвету различается (~33% товаров), а eSIM-only ≠ Sim+E-Sim —
+    схлопывание дало бы ложное «дешевле» и неверную цену для запрошенного цвета.
     """
-    groups: dict[str, list[Product]] = {}
+    groups: dict[tuple[str, str | None, str | None], list[Product]] = {}
     for p in products:
-        groups.setdefault(p.model_key, []).append(p)
+        groups.setdefault((p.model_key, p.sim_type, p.color), []).append(p)
     out: list[Product] = []
     for items in groups.values():
         priced = [p for p in items if p.price is not None]
@@ -195,6 +225,50 @@ def parse_price(text: str | None) -> int | None:
 def clean_title(title: str) -> str:
     """Свернуть пробелы/переносы для аккуратного показа."""
     return re.sub(r"\s+", " ", (title or "").replace("&nbsp;", " ")).strip()
+
+
+def family_title(title: str) -> str:
+    """Название ДО объёма включительно (без цвета) — для подписей/группировки семьи.
+
+    «Apple iPhone 17 Pro 256Gb Deep Blue (Sim+E-Sim)» -> «Apple iPhone 17 Pro 256Gb».
+    Без объёма (наушники, часы) — возвращаем как есть.
+    """
+    s = clean_title(title)
+    low = s.lower()
+    end: int | None = None
+    for rx in (_RAM_ROM_RE, _TB_RE, _GB_RE):
+        m = rx.search(low)
+        if m:
+            end = m.end() if end is None else max(end, m.end())
+    return s[:end].strip() if end is not None else s
+
+
+def color_of(title: str) -> str | None:
+    """Цвет/комплектация товара = нормализованный хвост ПОСЛЕ объёма памяти.
+
+    У ритейла бренд+модель идут ДО объёма, цвет — ПОСЛЕ ("256Gb Deep Blue").
+    Берём всё после объёма, выкидываем SIM-скобки и шум -> канон цвета для
+    группировки нашего каталога (di-park) по цвету. Без объёма (наушники, часы,
+    стилус) цвет не выделяем -> None (такие товары не дробим по цвету).
+
+    Цвета между магазинами называются по-разному (Midnight/Black/Чёрный), поэтому
+    этот ключ применяем ТОЛЬКО к нашему каталогу для показа per-color цены, а не
+    для матчинга конкурентов (те матчатся по модель+объём+SIM, цвет-агностично).
+    """
+    s = clean_title(title)
+    low = s.lower()
+    end: int | None = None
+    for rx in (_RAM_ROM_RE, _TB_RE, _GB_RE):
+        m = rx.search(low)
+        if m:
+            end = m.end() if end is None else max(end, m.end())
+    if end is None:
+        return None
+    tail = re.sub(r"\([^)]*\)", " ", s[end:])             # выкинуть (Sim+E-Sim)
+    tail = re.sub(r"[^\w]+", " ", tail, flags=re.UNICODE).lower().replace("ё", "е")
+    words = [w for w in tail.split()
+             if len(w) > 1 and not w.isdigit() and w not in _STOP]
+    return " ".join(words) or None
 
 
 # Б/У, уценка, восстановленные, % заряда батареи — НЕ сравниваем с новыми.

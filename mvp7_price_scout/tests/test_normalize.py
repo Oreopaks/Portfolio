@@ -1,6 +1,7 @@
 """Офлайн-тесты нормализации: model_key / storage_of / parse_price."""
 from mvp7_price_scout.normalize import (
-    model_key, storage_of, parse_price, collapse_variants, is_used, Product,
+    model_key, storage_of, sim_type_of, color_of, parse_price,
+    collapse_variants, is_used, Product,
 )
 
 
@@ -63,11 +64,51 @@ def test_ram_rom_not_leaked():
     assert "12" not in a.split()
 
 
-def test_collapse_variants_keeps_min_price():
+def test_sim_type_detection():
+    assert sim_type_of("Apple iPhone 17 256Gb White (Sim+E-Sim)") == "physical"
+    assert sim_type_of("iPhone 17 256Gb (Nano-SIM + eSIM)") == "physical"
+    assert sim_type_of("iPhone 17 256Gb eSIM") == "esim"
+    assert sim_type_of("iPhone 17 256Gb e-sim only") == "esim"
+    assert sim_type_of("Apple iPhone 17 256Gb White") is None       # SIM не указан
+    assert sim_type_of("iPhone 17 256Gb Starlight") is None          # цвет не ловится как sim
+
+
+def test_collapse_splits_by_sim_type():
+    """eSIM-only и Sim+E-Sim одного цвета — разные SKU, не схлопывать в одну цену."""
+    items = [
+        Product(shop="x", title="iPhone 17 256Gb Black (Sim+E-Sim)", price=150000),
+        Product(shop="x", title="iPhone 17 256Gb Black (Sim+E-Sim)", price=151000),
+        Product(shop="x", title="iPhone 17 256Gb Black eSIM", price=130000),
+    ]
+    out = collapse_variants(items)
+    assert len(out) == 2                                    # physical (мин 150000) + esim
+    assert sorted(p.price for p in out) == [130000, 150000]
+
+
+def test_color_of():
+    assert color_of("Apple iPhone 17 Pro 256Gb Deep Blue (Sim+E-Sim)") == "deep blue"
+    assert color_of("Apple iPhone 17 Pro 256Gb Cosmic Orange (E-Sim)") == "cosmic orange"
+    assert color_of("Samsung Galaxy S25 12/256Gb Navy") == "navy"
+    assert color_of("AirPods Pro 2") is None          # без объёма цвет не выделяем
+
+
+def test_collapse_keeps_one_row_per_color():
+    """Цвета больше НЕ схлопываются — цена за цвет различается (~33% каталога)."""
     items = [
         Product(shop="di-park", title="iPhone 13 128Gb Midnight", price=41990),
         Product(shop="di-park", title="iPhone 13 128Gb Starlight", price=None, in_stock=False),
         Product(shop="di-park", title="iPhone 13 128Gb Pink", price=42990),
+    ]
+    out = collapse_variants(items)
+    assert len(out) == 3
+    assert {p.color for p in out} == {"midnight", "starlight", "pink"}
+
+
+def test_collapse_dedups_same_color_keeps_min():
+    """Истинные дубли (один цвет, разные SKU/наличие) — схлопнуть в мин. цену."""
+    items = [
+        Product(shop="di-park", title="iPhone 13 128Gb Midnight", price=42990, in_stock=False),
+        Product(shop="di-park", title="iPhone 13 128Gb Midnight", price=41990),
     ]
     out = collapse_variants(items)
     assert len(out) == 1

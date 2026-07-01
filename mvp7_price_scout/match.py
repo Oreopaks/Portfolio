@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from rapidfuzz import fuzz
 
-from mvp7_price_scout.normalize import Product
+from mvp7_price_scout.normalize import Product, sim_type_of
 
 # Нижний порог token_sort_ratio среди уже прошедших guard-ы кандидатов (страховка).
 MIN_RATIO = 55
@@ -45,42 +45,56 @@ def _core_alpha(model_key: str) -> frozenset[str]:
 
 
 def build_index(base_rows: list[dict]) -> dict:
-    """Индекс каталога эталона: точный по ключу + бакеты по объёму."""
-    by_key: dict[str, dict] = {}
+    """Индекс каталога эталона: точный по ключу + бакеты по объёму.
+
+    Обогащаем строки sim_type (из title) — нужен для мягкого SIM-guard'а. Один
+    model_key может иметь несколько строк (eSIM-only и Sim+E-Sim), поэтому by_key
+    держит список, а не одну строку.
+    """
+    by_key: dict[str, list[dict]] = {}
     by_storage: dict[str | None, list[dict]] = {}
     for r in base_rows:
-        k = r["model_key"]
-        cur = by_key.get(k)
-        if cur is None or _cheaper(r, cur):
-            by_key[k] = r
+        r["sim_type"] = sim_type_of(r.get("title", ""))
+        by_key.setdefault(r["model_key"], []).append(r)
         by_storage.setdefault(r.get("storage"), []).append(r)
     return {"by_key": by_key, "by_storage": by_storage}
 
 
-def _cheaper(a: dict, b: dict) -> bool:
-    pa, pb = a.get("price"), b.get("price")
-    if pa is None:
-        return False
-    if pb is None:
-        return True
-    return pa < pb
+def _sim_ok(a: str | None, b: str | None) -> bool:
+    """Мягкий SIM-guard: конфликт ТОЛЬКО когда оба типа известны и различны.
+
+    Если конкурент (или эталон) тип SIM не указал — матчим как раньше, чтобы не
+    терять match-rate на витринах без пометки SIM.
+    """
+    return a is None or b is None or a == b
+
+
+def _cheapest(rows: list[dict]) -> dict:
+    priced = [r for r in rows if r.get("price") is not None]
+    return min(priced, key=lambda r: r["price"]) if priced else rows[0]
 
 
 def match_one(prod: Product, index: dict, min_ratio: int = MIN_RATIO) -> tuple[int | None, int]:
     """Вернуть (dipark_id, score) лучшего эталона для товара конкурента или (None, score).
 
     Кандидат валиден ТОЛЬКО при совпадении: объём + вариант-токены (pro/max/...) +
-    числовые модель-токены (17/s24/...) + хотя бы один общий бренд/линейка-токен.
+    числовые модель-токены (17/s24/...) + хотя бы один общий бренд/линейка-токен +
+    совместимый тип SIM (мягко: eSIM-only не матчится к Sim+E-Sim, см. _sim_ok).
     Среди валидных берём лучший token_sort_ratio (страховочный порог MIN_RATIO).
     """
-    exact = index["by_key"].get(prod.model_key)
-    if exact:
-        return exact["id"], 100
+    psim = prod.sim_type
+    exacts = index["by_key"].get(prod.model_key)
+    if exacts:
+        ok = [r for r in exacts if _sim_ok(psim, r["sim_type"])]
+        if ok:                                               # совместимый по SIM эталон
+            return _cheapest(ok)["id"], 100
     pk = prod.model_key
     pv, pids, pca = _variants(pk), _id_tokens(pk, prod.storage), _core_alpha(pk)
     best: dict | None = None
     best_score = 0
     for row in index["by_storage"].get(prod.storage, []):
+        if not _sim_ok(psim, row["sim_type"]):               # eSIM-only vs Sim+E-Sim
+            continue
         rk = row["model_key"]
         if _variants(rk) != pv:                              # pro/max/ultra/plus...
             continue

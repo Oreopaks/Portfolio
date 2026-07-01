@@ -39,18 +39,28 @@ def get_updates(token: str, offset: int | None) -> list[dict]:
     return data.get("result", [])
 
 
-def send_message(token: str, chat_id: int, text: str) -> None:
+def send_message(token: str, chat_id: int, text: str, buttons: list | None = None) -> None:
+    payload = {"chat_id": chat_id, "text": text[:4000],
+               "parse_mode": "HTML", "disable_web_page_preview": True}
+    if buttons:   # [(подпись, callback_data)] -> по кнопке на строку (названия длинные)
+        payload["reply_markup"] = {
+            "inline_keyboard": [[{"text": b[0], "callback_data": b[1]}] for b in buttons]
+        }
     try:
-        r = requests.post(
-            f"{API}/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": text[:4000],
-                  "parse_mode": "HTML", "disable_web_page_preview": True},
-            timeout=30,
-        )
+        r = requests.post(f"{API}/bot{token}/sendMessage", json=payload, timeout=30)
         if not r.ok:   # 400 (битый HTML), 403 (бот заблокан) — иначе ответ молча терялся
             print(f"[bot] sendMessage -> {chat_id} не дошло: {r.status_code} {r.text[:200]}")
     except Exception as e:
         print(f"[bot] sendMessage -> {chat_id} ошибка сети: {e}")
+
+
+def answer_callback(token: str, cb_id: str) -> None:
+    """Погасить «часики» на нажатой inline-кнопке (иначе клиент висит ~15с)."""
+    try:
+        requests.post(f"{API}/bot{token}/answerCallbackQuery",
+                      json={"callback_query_id": cb_id}, timeout=15)
+    except Exception as e:
+        print(f"[bot] answerCallbackQuery ошибка: {e}")
 
 
 def send_document(token: str, chat_id: int, path: str, caption: str = "",
@@ -95,6 +105,19 @@ def main() -> None:
 
         for upd in updates:
             offset = upd["update_id"] + 1
+
+            cb = upd.get("callback_query")               # тап по inline-кнопке (подсказка/цвет)
+            if cb:
+                answer_callback(token, cb["id"])
+                try:
+                    reply = handlers.handle_callback(conn, cb.get("data", ""))
+                except Exception as e:
+                    print("Ошибка callback:", e)
+                    reply = None
+                if reply and cb.get("message"):
+                    send_message(token, cb["message"]["chat"]["id"], reply.text, reply.buttons)
+                continue
+
             msg = upd.get("message") or upd.get("edited_message")
             if not msg or "text" not in msg:
                 continue
@@ -116,8 +139,8 @@ def main() -> None:
                 reply = handlers.handle_text(conn, text, is_admin)
             except Exception as e:
                 print("Ошибка обработки:", e)
-                reply = "Упс, что-то пошло не так. Попробуй ещё раз."
-            send_message(token, chat_id, reply)
+                reply = handlers.Reply("Упс, что-то пошло не так. Попробуй ещё раз.")
+            send_message(token, chat_id, reply.text, reply.buttons)
 
 
 if __name__ == "__main__":

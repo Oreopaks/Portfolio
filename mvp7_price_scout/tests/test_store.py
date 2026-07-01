@@ -32,7 +32,7 @@ def test_comparison_links_competitor_to_base(tmp_path):
     comp = Product(shop="sr57", title="Apple iPhone 17 256Gb", price=144990)
     comp.dipark_id = bid                      # матч проставит collector; тут вручную
     store.replace_shop(conn, "sr57", [comp])
-    got = store.competitors_for(conn, bid)
+    got = store.competitors_for(conn, store.base_by_id(conn, bid))   # по семье модель+объём+SIM
     assert len(got) == 1 and got[0]["shop"] == "sr57" and got[0]["price"] == 144990
 
 
