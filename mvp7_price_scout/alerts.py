@@ -25,12 +25,14 @@ def compute_alerts(conn, run_ts: str) -> list[str]:
     cur = conn.execute(
         """
         SELECT b.id AS pid, b.title AS title, b.price AS our,
-               c.shop AS shop, c.price AS cp, c.source_type AS st
+               c.shop AS shop, MIN(c.price) AS cp, c.source_type AS st
         FROM products b
         JOIN products c ON c.dipark_id = b.id AND c.source_type != 'base'
         WHERE b.source_type = 'base' AND c.price IS NOT NULL
+        GROUP BY b.id, c.shop
         """
-    ).fetchall()
+    ).fetchall()   # GROUP BY (pid, shop): одна строка на пару, без дублей алертов
+    # (при MIN(price) SQLite берёт c.source_type из строки-минимума)
 
     scored: list[tuple[int, str]] = []
     for r in cur:
@@ -39,8 +41,10 @@ def compute_alerts(conn, run_ts: str) -> list[str]:
         title = handlers._esc(title)         # scraped title -> безопасно в HTML
         p0 = prev.get((pid, shop))
         label = handlers._label(shop, st)
-        # конкурент ВПЕРВЫЕ дешевле нас
-        if our is not None and cp < our and (p0 is None or p0 >= our) and (our - cp) >= MIN_ABS:
+        # конкурент ВПЕРВЫЕ подрезал: был >= нашей цены, стал ниже.
+        # p0 is None (нет истории пары) НЕ считаем «впервые дешевле» — иначе смена
+        # url/каталога конкурента (все пары новые) даёт лавину ложных алертов.
+        if our is not None and cp < our and p0 is not None and p0 >= our and (our - cp) >= MIN_ABS:
             scored.append((
                 our - cp,
                 f"🔻 <b>{title}</b>\n{label} {handlers.fmt_int(cp)} ₽ — теперь дешевле нас "

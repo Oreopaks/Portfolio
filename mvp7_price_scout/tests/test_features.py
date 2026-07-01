@@ -27,6 +27,22 @@ def test_alert_on_new_undercut(tmp_path):
     assert any("дешевле нас" in m for m in msgs)
 
 
+def test_alert_dedups_same_shop(tmp_path):
+    """Две строки одного магазина к одному товару -> ОДИН алерт (не дубль «Marshall ×2»)."""
+    conn = store.connect(tmp_path / "p.db")
+    bid = _seed_base(conn, our=150000)
+    prev = Product(shop="sr57", title="x", price=151000)   # раньше был дороже нас
+    prev.dipark_id = bid
+    store.append_price_log(conn, [prev], "2026-06-29T10:00:00")
+    rows = [Product(shop="sr57", title="iPhone 17 Pro Max 256 A", price=144000),
+            Product(shop="sr57", title="iPhone 17 Pro Max 256 B", price=145000)]
+    for r in rows:
+        r.dipark_id = bid
+    store.replace_shop(conn, "sr57", rows)
+    msgs = alerts.compute_alerts(conn, "2026-06-29T12:00:00")
+    assert sum("дешевле нас" in m for m in msgs) == 1
+
+
 def test_no_alert_without_history(tmp_path):
     conn = store.connect(tmp_path / "p.db")
     bid = _seed_base(conn)

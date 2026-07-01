@@ -47,6 +47,15 @@ CREATE TABLE IF NOT EXISTS price_log (
 );
 CREATE INDEX IF NOT EXISTS idx_pricelog_ts ON price_log(run_ts);
 CREATE INDEX IF NOT EXISTS idx_pricelog_key ON price_log(dipark_id, shop);
+
+-- Счётчики товаров по источнику за прогон — для health-алерта «источник отвалился».
+CREATE TABLE IF NOT EXISTS run_counts (
+    run_ts     TEXT NOT NULL,
+    shop       TEXT NOT NULL,
+    n          INTEGER NOT NULL,
+    with_price INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_runcounts_ts ON run_counts(run_ts);
 """
 
 
@@ -129,15 +138,11 @@ def competitors_for(conn: sqlite3.Connection, base_row: dict) -> list[dict]:
     все конкуренты семьи, и сохраняется фаззи-привязка матчера (аксессуары и т.п.).
     """
     fam = conn.execute(
-        "SELECT id, title FROM products "
+        "SELECT id FROM products "
         "WHERE source_type = 'base' AND model_key = ? AND storage IS ?",
         (base_row["model_key"], base_row["storage"]),
     ).fetchall()
-    bsim = sim_type_of(base_row["title"])
-    ids = [r["id"] for r in fam
-           if bsim is None or sim_type_of(r["title"]) is None or sim_type_of(r["title"]) == bsim]
-    if not ids:
-        ids = [base_row["id"]]
+    ids = [r["id"] for r in fam] or [base_row["id"]]     # все цвета+SIM семьи
     placeholders = ",".join("?" * len(ids))
     cur = conn.execute(
         f"SELECT shop, title, price, url, in_stock, source_type, fetched_at "
@@ -145,7 +150,16 @@ def competitors_for(conn: sqlite3.Connection, base_row: dict) -> list[dict]:
         f"ORDER BY (price IS NULL), price",
         ids,
     )
-    return [dict(r) for r in cur.fetchall()]
+    # мягкий SIM-guard по SIM самого КОНКУРЕНТА (а не по строке, к которой он
+    # случайно привязался матчером): конкурент без пометки SIM виден на любой
+    # карточке, явный eSIM — только на eSIM, явный Sim+E-Sim — только на physical.
+    bsim = sim_type_of(base_row["title"])
+    out: list[dict] = []
+    for r in cur.fetchall():
+        csim = sim_type_of(r["title"])
+        if bsim is None or csim is None or bsim == csim:
+            out.append(dict(r))
+    return out
 
 
 def family_colors(conn: sqlite3.Connection, base_row: dict) -> list[dict]:
@@ -231,6 +245,27 @@ def previous_run_prices(conn: sqlite3.Connection, before_ts: str) -> dict[tuple[
         "SELECT dipark_id, shop, price FROM price_log WHERE run_ts = ?", (prev_ts,)
     )
     return {(r["dipark_id"], r["shop"]): r["price"] for r in cur.fetchall() if r["price"] is not None}
+
+
+def record_source_counts(conn: sqlite3.Connection, run_ts: str,
+                         counts: dict[str, tuple[int, int]]) -> None:
+    """Запомнить {shop: (n, with_price)} за прогон — для сравнения со следующим."""
+    rows = [(run_ts, shop, n, wp) for shop, (n, wp) in counts.items()]
+    if rows:
+        with conn:
+            conn.executemany(
+                "INSERT INTO run_counts (run_ts, shop, n, with_price) VALUES (?,?,?,?)", rows)
+
+
+def previous_source_counts(conn: sqlite3.Connection, before_ts: str) -> dict[str, tuple[int, int]]:
+    """Счётчики источников из последнего прогона СТРОГО до before_ts -> {shop:(n,with_price)}."""
+    row = conn.execute(
+        "SELECT MAX(run_ts) AS t FROM run_counts WHERE run_ts < ?", (before_ts,)).fetchone()
+    if not row or not row["t"]:
+        return {}
+    cur = conn.execute(
+        "SELECT shop, n, with_price FROM run_counts WHERE run_ts = ?", (row["t"],))
+    return {r["shop"]: (r["n"], r["with_price"]) for r in cur.fetchall()}
 
 
 def market_position(conn: sqlite3.Connection) -> dict:

@@ -1,7 +1,7 @@
 """Офлайн-тесты нормализации: model_key / storage_of / parse_price."""
 from mvp7_price_scout.normalize import (
     model_key, storage_of, sim_type_of, color_of, parse_price,
-    collapse_variants, is_used, Product,
+    collapse_variants, is_used, is_special_edition, Product,
 )
 
 
@@ -113,6 +113,14 @@ def test_collapse_dedups_same_color_keeps_min():
     out = collapse_variants(items)
     assert len(out) == 1
     assert out[0].price == 41990 and out[0].in_stock is True
+
+
+def test_is_special_edition():
+    assert is_special_edition("POCO X8 Pro 12/512Gb Black Iron Man Edition")
+    assert is_special_edition("Смартфон Apple iPhone 17 Pro 256 ГБ Coffee (эксклюзивный)")
+    assert is_special_edition("Xiaomi 14 Ultra Limited")
+    assert not is_special_edition("Apple iPhone 17 Pro 256Gb Deep Blue (Sim+E-Sim)")
+    assert not is_special_edition("Samsung Galaxy S25 256Gb Navy")
 
 
 def test_parse_price():

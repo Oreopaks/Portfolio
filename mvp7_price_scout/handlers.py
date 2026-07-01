@@ -17,7 +17,7 @@ from pathlib import Path
 from rapidfuzz import fuzz
 
 from mvp7_price_scout import store
-from mvp7_price_scout.normalize import model_key, color_of, family_title
+from mvp7_price_scout.normalize import model_key, color_of, family_title, sim_type_of
 
 ROOT = str(Path(__file__).resolve().parents[1])   # корень репо (freelance-mvp)
 
@@ -280,7 +280,8 @@ def render_comparison(conn, base_row: dict) -> str:
     """Понятная карточка владельцу: вердикт + кто дешевле/дороже тебя + что сделать."""
     our = base_row["price"]
     comps = _dedup_comps(store.competitors_for(conn, base_row))
-    lines = [f"📱 {_esc(_short_title(base_row['title']))}"]
+    sim_tag = {"esim": " · eSIM", "physical": " · Sim+eSIM"}.get(sim_type_of(base_row["title"]), "")
+    lines = [f"📱 {_esc(_short_title(base_row['title']))}{sim_tag}"]
     lines.append(f"💰 Твоя цена: {fmt_int(our)} ₽" if our else "💰 Твоя цена: под заказ")
 
     priced = sorted([c for c in comps if c["price"] is not None], key=lambda c: c["price"])
@@ -538,7 +539,12 @@ def handle_text(conn, text: str, is_admin: bool) -> Reply:
 
 
 def handle_callback(conn, data: str) -> Reply | None:
-    """Тап по inline-кнопке «p:{id}» -> карточка выбранного товара (+ цвета семьи)."""
+    """Тап по inline-кнопке «p:{id}» -> карточка выбранного товара (+ цвета семьи).
+
+    id меняются при каждом пересборе каталога (replace_shop = DELETE+INSERT), так
+    что кнопки в старых сообщениях протухают. На неизвестный id — не молчим, а
+    просим переспросить (иначе мёртвый тап без реакции).
+    """
     if not data or not data.startswith("p:"):
         return None
     try:
@@ -546,4 +552,7 @@ def handle_callback(conn, data: str) -> Reply | None:
     except ValueError:
         return None
     row = store.base_by_id(conn, pid)
-    return _product_reply(conn, row) if row else None
+    if not row:
+        return Reply("Этот список устарел — цены с тех пор обновились. "
+                     "Напиши товар ещё раз, пришлю свежие цены.")
+    return _product_reply(conn, row)

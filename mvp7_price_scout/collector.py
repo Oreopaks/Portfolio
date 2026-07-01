@@ -25,7 +25,7 @@ import shared.config  # noqa: F401  — подхватывает .env
 
 from mvp7_price_scout import alerts, notify, store
 from mvp7_price_scout.match import match_all
-from mvp7_price_scout.normalize import Product, collapse_variants, is_used
+from mvp7_price_scout.normalize import Product, collapse_variants, is_special_edition, is_used
 from mvp7_price_scout.sources.dipark_source import fetch_dipark_catalog
 from mvp7_price_scout.sources.iprice_source import fetch_iprice
 from mvp7_price_scout.sources.ispace_source import fetch_ispace
@@ -66,8 +66,13 @@ def _stamp(products: list[Product]) -> list[Product]:
 
 
 def _new_only(products: list[Product]) -> list[Product]:
-    """Отсечь Б/У/уценку — сравниваем только новые товары."""
-    return [p for p in products if not is_used(p.title)]
+    """Отсечь Б/У/уценку и спец/эксклюзив-издания — сравниваем сопоставимое.
+
+    Спец-издания (Iron Man Edition, эксклюзив-цвета) стоят сильно дороже, а
+    model_key их не различает -> кросс-матч со стандартом даёт ложные сигналы.
+    """
+    return [p for p in products
+            if not is_used(p.title) and not is_special_edition(p.title)]
 
 
 def collect_base(conn) -> list[dict]:
@@ -114,6 +119,27 @@ def run(heavy: bool = False, db: str | None = None) -> None:
             print(f"[collector] алертов: {len(msgs)}")
     except Exception as e:
         print(f"[collector] алерты упали: {e}")
+
+    # Health: упал ли источник против прошлого прогона (иначе выпадение источника
+    # немо — владелец думает, что сравнил со всеми, а iprice/ispace отвалились).
+    try:
+        cur_counts = {r["shop"]: (r["n"], r["with_price"])
+                      for r in store.stats(conn) if r["source_type"] != "base"}
+        prev = store.previous_source_counts(conn, run_ts)
+        # union: источник, вернувший 0, вычищается из products и пропадает из stats —
+        # именно его (iprice=0) и надо поймать, поэтому идём и по прошлым магазинам.
+        drops = []
+        for shop in set(cur_counts) | set(prev):
+            n = cur_counts.get(shop, (0, 0))[0]
+            pn = prev.get(shop, (0, 0))[0]
+            if pn and (n == 0 or n < pn * 0.5):
+                drops.append(f"⚠️ <b>{shop}</b>: {n} товаров (было {pn}) — источник отвалился или сломался.")
+        if drops:
+            notify.send_admins("🚨 <b>Проблема сбора цен</b>\n\n" + "\n".join(drops))
+            print(f"[collector] health-алертов: {len(drops)}")
+        store.record_source_counts(conn, run_ts, cur_counts)
+    except Exception as e:
+        print(f"[collector] health-проверка упала: {e}")
 
     print("\n=== срез базы (магазин / тип / товаров / с ценой / обновлено) ===")
     for r in store.stats(conn):

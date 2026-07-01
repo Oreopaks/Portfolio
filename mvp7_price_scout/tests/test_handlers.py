@@ -109,8 +109,9 @@ def test_callback_opens_product_card(tmp_path):
     blue = handlers.find_product(conn, "17 pro 256 blue")
     r = handlers.handle_callback(conn, f"p:{blue['id']}")
     assert r and "Deep Blue" in r.text
-    assert handlers.handle_callback(conn, "garbage") is None
-    assert handlers.handle_callback(conn, "p:999999") is None
+    assert handlers.handle_callback(conn, "garbage") is None      # не наша кнопка
+    stale = handlers.handle_callback(conn, "p:999999")            # протухший id
+    assert stale and "устарел" in stale.text
 
 
 def test_not_found_has_no_buttons(tmp_path):

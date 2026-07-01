@@ -12,13 +12,28 @@ UA = (
 HEADERS = {"User-Agent": UA, "Accept-Language": "ru,en;q=0.9"}
 
 
+_RETRY_STATUS = {429, 500, 502, 503, 504}   # временные — есть смысл повторить
+
+
 def get(url: str, timeout: int = 40, tries: int = 2, **kw) -> requests.Response:
-    """GET с UA и ретраями. Кидает последнее исключение, если все попытки упали."""
+    """GET с UA и ретраями. Повторяет на сетевых сбоях И на 429/5xx.
+
+    На не-200 не бросает (совместимость: вызыватели читают .text), но ГРОМКО
+    логирует — иначе блок сайта (403/503) неотличим от «пусто» и целый источник
+    молча выпадает из сравнения.
+    """
     last: Exception | None = None
     for i in range(tries):
         try:
-            return requests.get(url, headers=HEADERS, timeout=timeout, **kw)
+            r = requests.get(url, headers=HEADERS, timeout=timeout, **kw)
         except Exception as e:  # сеть может моргать — пробуем ещё раз
             last = e
             time.sleep(1.0 * (i + 1))
+            continue
+        if r.status_code in _RETRY_STATUS and i < tries - 1:
+            time.sleep(1.5 * (i + 1))
+            continue
+        if r.status_code >= 400:      # 403 (анти-бот), 404, 5xx — источник отдаёт не данные
+            print(f"[http] {r.status_code} {url}")
+        return r
     raise last  # type: ignore[misc]

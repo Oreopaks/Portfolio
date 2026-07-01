@@ -106,7 +106,7 @@ bash mvp7_price_scout/run_bot.sh                          # бот в фоне (
 ## Тесты
 
 ```bash
-.venv/bin/python -m pytest mvp7_price_scout/tests -q     # 35 тестов
+.venv/bin/python -m pytest mvp7_price_scout/tests -q     # 57 тестов
 ```
 
 ## Безопасность
