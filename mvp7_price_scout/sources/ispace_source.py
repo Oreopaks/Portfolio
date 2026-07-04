@@ -2,9 +2,10 @@
 Источник orel.ispace-shop.ru — Bitrix. Цены СКРЫТЫ в листингах
 («Цена указана при оплате наличными»), но есть на странице товара (.price).
 
-Поэтому: собираем ссылки товаров /offers/<slug>/ с телефонных категорий (в
-статике ~20 на категорию, блок «популярное») -> тянем страницы товаров ->
-имя (h1) + цена (.price). Playwright не нужен. Покрытие частичное (популярное).
+Поэтому: собираем ссылки товаров /offers/<slug>/ из sitemap -> тянем страницы
+товаров (модель-URL /offers/apple_iphone_15/ редиректит на конкретный SKU
+/offers/apple_iphone_15_512gb_black_esim/ — идём ЗА редиректом) -> имя
+(h1/og:title/slug) + цена (.good__total-price / itemprop=price). Playwright не нужен.
 
 parse_offer(html, url) — чистая. fetch_ispace(...) — боевая.
 """
@@ -56,11 +57,15 @@ def parse_offer(html: str, url: str = "") -> Product | None:
     for bad in soup.select("del, s, [class*=old-price], [class*=price-old], [class*=oldprice], [class*=discount]"):
         bad.decompose()
     price = None
-    # сначала точный селектор итоговой цены, потом фолбэк по классам
-    for el in soup.select(".good__total-price, .price, [class*=price]"):
-        price = parse_price(el.get_text())
-        if price:
-            break
+    # итоговая цена товара строго из карточки, НЕ из блока «популярное»
+    # (.populars__item-price — сопутствующие товары) и не из рассрочки:
+    # good__total-price / schema.org itemprop=price / .price — по приоритету.
+    for sel in (".good__total-price", "[itemprop=price]", ".price"):
+        el = soup.select_one(sel)
+        if el:
+            price = parse_price(el.get("content") or el.get_text())
+            if price:
+                break
     text = soup.get_text(" ", strip=True).lower()
     in_stock = "нет в наличии" not in text
     return Product(shop=SHOP, title=title, price=price, url=url, in_stock=in_stock)
@@ -106,10 +111,15 @@ def fetch_ispace(max_products: int = 300, throttle: float = 0.3) -> list[Product
         except Exception as e:
             print(f"[ispace] {url}: {e}")
             continue
-        # снятый товар редиректит на листинг — там первое «число с ценой» мусорное
-        if r.status_code != 200 or r.url.rstrip("/") != url.rstrip("/"):
+        # модель-URL (/offers/apple_iphone_15/) редиректит на конкретный SKU
+        # (…_512gb_black_esim) — это ЖИВОЙ товар с ценой, оставляем. Снятый товар
+        # редиректит на ЛИСТИНГ (/catalog/…) — его отсекаем: если после редиректа
+        # ушли НЕ на /offers/, пропускаем (иначе цена тайла листинга липнет к
+        # неверному товару). Раньше резались ВСЕ редиректы -> терялись новые
+        # модели, в базе оставалось ~6 товаров.
+        if r.status_code != 200 or "/offers/" not in r.url:
             continue
-        p = parse_offer(r.text, url)
+        p = parse_offer(r.text, r.url)          # r.url — итоговый SKU-URL (для slug-имени)
         if p and p.price:
             out.append(p)
         time.sleep(throttle)

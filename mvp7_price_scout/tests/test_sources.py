@@ -1,5 +1,6 @@
 """Тесты чистых HTML-парсеров источников (без сети): sr57, iprice, kingstore, repremium, mobilax."""
 from mvp7_price_scout.sources.iprice_source import parse_iprice
+from mvp7_price_scout.sources.ispace_source import parse_offer as parse_ispace_offer
 from mvp7_price_scout.sources.kingstore_source import parse_kingstore
 from mvp7_price_scout.sources.mobilax_source import parse_mobilax
 from mvp7_price_scout.sources.repremium_source import parse_repremium
@@ -176,6 +177,28 @@ def test_parse_mobilax_price_stock_url():
     p2 = by_title["Apple iPhone 16 128Gb Black"]
     assert p2.price == 64990                                  # фолбэк на .products__price-new
     assert p2.in_stock is False                               # «Нет в наличии»
+
+
+# Страница товара ispace: цена в .good__total-price; блок «популярное»
+# (.populars__item-price, дешёвые сопутствующие) НЕ должен подменять цену.
+ISPACE_OFFER_HTML = """
+<html><head><meta property="og:title" content="Apple iPhone 15 512Gb Black eSIM"></head>
+<body>
+  <div class="populars"><div class="populars__item-price t2">4 490 &#8381;</div></div>
+  <div class="good__total-price t2">75&nbsp;890 &#8381;</div>
+  <meta itemprop="price" content="75890">
+</body></html>
+"""
+
+
+def test_parse_ispace_offer_uses_total_price_not_populars():
+    p = parse_ispace_offer(
+        ISPACE_OFFER_HTML,
+        "https://orel.ispace-shop.ru/offers/apple_iphone_15_512gb_black_esim/")
+    assert p and p.shop == "ispace"
+    assert p.price == 75890                     # good__total-price, НЕ 4 490 из «популярное»
+    assert "iphone 15" in p.title.lower() and p.storage == "512gb"
+    assert parse_ispace_offer("", "") is None   # пустой HTML -> None (без падения)
 
 
 def test_parse_empty_html_no_crash():
