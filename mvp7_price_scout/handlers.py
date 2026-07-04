@@ -17,7 +17,7 @@ from pathlib import Path
 from rapidfuzz import fuzz
 
 from mvp7_price_scout import store
-from mvp7_price_scout.normalize import model_key, color_of, family_title, sim_type_of
+from mvp7_price_scout.normalize import _STOP, model_key, color_of, family_title, sim_type_of
 
 ROOT = str(Path(__file__).resolve().parents[1])   # корень репо (freelance-mvp)
 
@@ -34,8 +34,11 @@ class Reply:
 
 SHOP_LABEL = {
     "sr57": "sr57.ru", "repremium": "repremium", "iprice": "iprice",
-    "ispace": "ispace", "kingstore": "KingStore", "di-park": "Di-Park",
+    "ispace": "ispace", "kingstore": "KingStore", "mobilax": "Мобилакс",
+    "smart_room_57": "Instagram", "di-park": "Di-Park",
 }
+# Метка типа SIM в карточке/выгрузке (жёсткое разделение SKU, см. sim_type_of).
+_SIM_TAG = {"esim": " · eSIM", "sim_esim": " · Sim+eSIM", "dual_sim": " · 2 SIM"}
 HELP = (
     "Я сравниваю цены Di-Park с конкурентами Орла.\n\n"
     "• Напиши товар — пришлю таблицу цен.\n"
@@ -44,7 +47,8 @@ HELP = (
     "• /top — где мы дороже всех (теряем продажи)\n"
     "• /stats — наша позиция на рынке одним взглядом\n"
     "• /export — выгрузить всё сравнение в Excel/CSV\n"
-    "• /refresh — обновить цены конкурентов (только админ)"
+    "• /refresh — обновить цены конкурентов (только админ)\n"
+    "• /status — прогресс обновления цен"
 )
 
 
@@ -100,6 +104,12 @@ def _short_title(title: str) -> str:
     return re.sub(r"\s+", " ", t).strip()
 
 
+# Аксессуар-слова: в подсказках сам товар ранжируем выше аксессуара к нему
+# («s24» — сначала телефон Galaxy, потом чехлы PITAKA S24).
+_ACCESSORY = {"чехол", "чехлы", "накладка", "стекло", "пленка", "ремешок",
+              "кабель", "зарядка", "зарядное", "адаптер", "защитное"}
+
+
 # Цвет в запросе RU -> EN (каталог di-park называет цвета по-английски).
 _COLOR_RU = {
     "чёрный": "black", "черный": "black", "белый": "white", "синий": "blue",
@@ -114,13 +124,14 @@ _COLOR_RU = {
 def _query_colors(query: str, vocab: set) -> set:
     """Цвет(а) из запроса -> EN-токены для сопоставления с цветом каталога.
 
-    Цвет = буквенный токен, которого нет в модель-словаре каталога (vocab). RU
-    переводим в EN (синий->blue), чтобы найти «Deep Blue».
+    Цвет = буквенный токен, которого нет ни в модель-словаре каталога (vocab),
+    ни в стоп-словах (_STOP: sim/esim/новый/... — это НЕ цвет, иначе «sim+esim»
+    из запроса уплывал бы в цвет-фильтр). RU переводим в EN (синий->blue).
     """
     out: set = set()
     for w in re.sub(r"[^\w]+", " ", query.lower().replace("ё", "е"), flags=re.UNICODE).split():
         w = _COLOR_RU.get(w, w)
-        if len(w) > 1 and not any(c.isdigit() for c in w) and w not in vocab:
+        if len(w) > 1 and not any(c.isdigit() for c in w) and w not in vocab and w not in _STOP:
             out.add(w)
     return out
 
@@ -148,8 +159,9 @@ def find_product(conn, query: str, min_score: int = 55) -> dict | None:
     Ранжируем по доле токенов запроса в товаре, потом token_sort_ratio — иначе
     короткий «galaxy s24» цепляет чехол «Pitaka S24». Цвет/шум (буквенные токены
     вне словаря каталога) на поиск семьи не влияют. Затем внутри семьи выбираем
-    строку запрошенного цвета (каталог per-color, цена за цвет точная); если цвет
-    не указан или не найден — берём самый дешёвый цвет.
+    строку запрошенного типа SIM («sim+esim» -> Sim+E-Sim, не дешёвый eSIM-only)
+    и запрошенного цвета (каталог per-color, цена за цвет точная); если SIM/цвет
+    не указан или не найден — берём самый дешёвый вариант.
     """
     qk = model_key(query)
     if not qk:
@@ -165,11 +177,17 @@ def find_product(conn, query: str, min_score: int = 55) -> dict | None:
         return len(qtok & set(r["model_key"].split())) / len(qtok) if qtok else 0.0
 
     best = max(cands, key=lambda r: (coverage(r), fuzz.token_sort_ratio(ekey, r["model_key"])))
-    if coverage(best) < 0.5 or fuzz.token_sort_ratio(ekey, best["model_key"]) < min_score:
+    cov = coverage(best)
+    # fuzz-порог только при неполном покрытии: короткий запрос («ipad», «17»)
+    # против длинного ключа даёт низкий fuzz даже при cov=1.0 — не тупик
+    if cov < 0.5 or (cov < 1.0 and fuzz.token_sort_ratio(ekey, best["model_key"]) < min_score):
         return None
 
     fam = [r for r in cands
            if r["model_key"] == best["model_key"] and r["storage"] == best["storage"]]
+    qsim = sim_type_of(query)
+    if qsim:                              # запрошен тип SIM — сужаем семью на него
+        fam = [r for r in fam if sim_type_of(r["title"]) == qsim] or fam
     want = _query_colors(query, vocab)
     if want:
         picked = [r for r in fam if want & set((color_of(r["title"]) or "").split())]
@@ -203,6 +221,9 @@ def search_suggestions(conn, query: str, limit: int = 8, min_score: int = 45) ->
     cands = store.search_base(conn, qk)
     if not cands:
         return []
+    qsim = sim_type_of(query)
+    if qsim:                              # запрошен тип SIM — семьи/цены только его
+        cands = [r for r in cands if sim_type_of(r["title"]) == qsim] or cands
     vocab = set().union(*(set(r["model_key"].split()) for r in cands))
     qtok = _qtokens(qk, vocab)
     ekey = " ".join(sorted(qtok))
@@ -219,7 +240,9 @@ def search_suggestions(conn, query: str, limit: int = 8, min_score: int = 45) ->
     out: list[dict] = []
     for rows in fams.values():
         sc = max(score(r) for r in rows)
-        if sc[0] < 0.5 or sc[1] < min_score:
+        # fuzz-порог только при неполном покрытии (см. find_product): иначе
+        # «ipad» терял все 25 семей iPad и бот отвечал «Не нашёл»
+        if sc[0] < 0.5 or (sc[0] < 1.0 and sc[1] < min_score):
             continue
         colored = [r for r in rows if want & set((color_of(r["title"]) or "").split())] if want else []
         rep = _cheapest_row(colored or rows)
@@ -229,14 +252,17 @@ def search_suggestions(conn, query: str, limit: int = 8, min_score: int = 45) ->
             prices = [r["price"] for r in rows if r["price"] is not None]
             tail = f" — от {fmt_int(min(prices))} ₽" if prices else ""
             label = _fam_label(rep["title"]) + tail
-        out.append({"id": rep["id"], "label": label, "price": rep["price"], "score": sc})
+        acc = int(bool(_ACCESSORY & set(rep["model_key"].split())))
+        out.append({"id": rep["id"], "label": label, "price": rep["price"],
+                    "score": sc, "accessory": acc})
 
     if not out:
         return []
-    # сначала по покрытию, затем дешёвые (для покупателя нагляднее), затем fuzz
+    # сначала по покрытию, затем товары раньше аксессуаров, затем fuzz, затем дешёвые
     out.sort(key=lambda x: (-x["score"][0],
-                            x["price"] if x["price"] is not None else 10 ** 9,
-                            -x["score"][1]))
+                            x["accessory"],
+                            -x["score"][1],
+                            x["price"] if x["price"] is not None else 10 ** 9))
     topcov = out[0]["score"][0]
     out = [s for s in out if s["score"][0] == topcov]   # только верхний слой покрытия (без 16/14 под «17»)
     return out[:limit]
@@ -259,16 +285,18 @@ def _variant_buttons(conn, base_row: dict) -> list:
 
 
 def _dedup_comps(comps: list[dict]) -> list[dict]:
-    """Схлопнуть строки конкурента с одинаковыми (магазин, тип, цена).
+    """Одна строка на (магазин, тип источника) — его ЛУЧШАЯ цена.
 
-    Разные SKU одного магазина по одной цене визуально дублируются: аксессуары
-    без объёма памяти (наушники и т.п.) матчатся несколькими model_key к одному
-    товару di-park. Для показа это шум — оставляем уникальные. Порядок сохраняем.
+    Матчер цвет-агностичен, поэтому один магазин даёт несколько строк семьи
+    (цвета/варианты) с разными ценами — как «5 конкурентов» это шум и раздувает
+    счётчик «Дороже тебя». Вход отсортирован по цене (competitors_for: NULL в
+    хвосте), значит первая строка магазина = его минимальная цена; остальные
+    отбрасываем. Строка без цены выживает только у магазина, где цен нет вовсе.
     """
     seen: set[tuple] = set()
     out: list[dict] = []
     for c in comps:
-        key = (c["shop"], c["source_type"], c["price"])
+        key = (c["shop"], c["source_type"])
         if key in seen:
             continue
         seen.add(key)
@@ -280,15 +308,30 @@ def render_comparison(conn, base_row: dict) -> str:
     """Понятная карточка владельцу: вердикт + кто дешевле/дороже тебя + что сделать."""
     our = base_row["price"]
     comps = _dedup_comps(store.competitors_for(conn, base_row))
-    sim_tag = {"esim": " · eSIM", "physical": " · Sim+eSIM"}.get(sim_type_of(base_row["title"]), "")
+    sim_tag = _SIM_TAG.get(sim_type_of(base_row["title"]), "")
     lines = [f"📱 {_esc(_short_title(base_row['title']))}{sim_tag}"]
     lines.append(f"💰 Твоя цена: {fmt_int(our)} ₽" if our else "💰 Твоя цена: под заказ")
 
-    priced = sorted([c for c in comps if c["price"] is not None], key=lambda c: c["price"])
+    # Валидные (тип SIM совпал) vs флагнутые (немаркированный конкурент с ценой
+    # уровня eSIM-версии) — в вердикт/«Поставь» идут ТОЛЬКО валидные, sim_ok=True.
+    priced = sorted([c for c in comps if c["price"] is not None and c.get("sim_ok", True)],
+                    key=lambda c: c["price"])
+    flagged = sorted([c for c in comps if c["price"] is not None and not c.get("sim_ok", True)],
+                     key=lambda c: c["price"])
     missing = [c for c in comps if c["price"] is None]
+
+    def flagged_lines() -> list[str]:
+        if not flagged:
+            return []
+        out = ["\n⚠️ Не учитываю (цена уровня eSIM-версии, тип SIM у конкурента "
+               "не указан — сверь вручную):"]
+        out += [f" • {_label(c['shop'], c['source_type'])} — {fmt_int(c['price'])} ₽"
+                for c in flagged]
+        return out
 
     if not priced:
         lines.append("\nКонкурентов с этим товаром не нашёл.")
+        lines += flagged_lines()
         if missing:
             lines.append("◽ есть, но без цены: " + ", ".join(
                 sorted({_label(c["shop"], c["source_type"]) for c in missing})))
@@ -321,11 +364,17 @@ def render_comparison(conn, base_row: dict) -> str:
             lines.append(f"\n🟢 Дороже тебя ({len(pricier)}):")
             lines += [row(c, "+") for c in pricier]
         if cheaper:
-            lines.append(f"\n🎯 Поставь {fmt_int(priced[0]['price'] - 100)} ₽ → станешь дешевле всех")
+            # ориентир «Поставь» — только по ВАЛИДНЫМ (тип SIM совпал) и без OCR-цен
+            # (нужна сверка). Немаркированный eSIM-конкурент сюда уже не попадёт: он
+            # отфильтрован в priced (sim_ok=False) — корень бага «поставь 94 890 ₽».
+            floor = next((c for c in priced if c["source_type"] != "ig_ocr"), None)
+            if floor:
+                lines.append(f"\n🎯 Поставь {fmt_int(floor['price'] - 100)} ₽ → станешь дешевле всех")
     else:
         lines.append("\nЦены конкурентов:")
         lines += [row(c, "") for c in priced]
 
+    lines += flagged_lines()
     if missing:
         lines.append("◽ без цены: " + ", ".join(
             sorted({_label(c["shop"], c["source_type"]) for c in missing})))
@@ -341,6 +390,10 @@ def render_stats(conn) -> str:
         return "Пока нет сопоставленных товаров — запусти сбор (collector)."
     t = mp["total"]
     pct = lambda n: f"{round(n / t * 100)}%"
+    # свежесть по источникам — владелец видит сам, если какой-то магазин протух
+    fresh = "\n".join(
+        f" • {_label(r['shop'], r['source_type'])} — {r['n']} тов., {fmt_ago(r['last'])}"
+        for r in store.stats(conn) if r["source_type"] != "base")
     return (
         "📊 Твоя позиция на рынке\n"
         f"Сравнил {t} твоих товаров с конкурентами:\n\n"
@@ -348,46 +401,49 @@ def render_stats(conn) -> str:
         f"🔴 Ты дороже всех:   {mp['pricier']} ({pct(mp['pricier'])})  ← тут теряешь\n"
         f"⚪ Наравне:           {mp['equal']}\n\n"
         f"Где дороже — в среднем на {mp['avg_loss_pct']}% выше конкурента.\n"
-        "Список где теряешь → /top"
+        "Список где теряешь → /top\n\n"
+        f"🕒 Свежесть цен:\n{fresh}"
     )
 
 
 def _comparison_rows(conn) -> tuple[list[str], list[dict]]:
-    """Собрать данные сравнения: (список магазинов, строки с вычисленными полями)."""
+    """Собрать данные сравнения: (список магазинов, строки с вычисленными полями).
+
+    Через ту же семейную выборку, что карточка бота (competitors_for: семья +
+    SIM-guard + in_stock) — иначе Excel противоречил боту (в боте «дороже всех»,
+    в Excel «дешевле всех») и содержал неотличимые дубли одного названия с
+    разными ценами (eSIM и Sim+eSIM без пометки).
+    """
     shops = [r["shop"] for r in conn.execute(
         "SELECT DISTINCT shop FROM products WHERE source_type!='base' ORDER BY shop")]
-    cur = conn.execute(
-        """
-        SELECT b.id AS pid, b.title AS title, b.price AS our, c.shop AS shop, c.price AS cp
-        FROM products b
-        JOIN products c ON c.dipark_id = b.id AND c.source_type != 'base'
-        WHERE b.source_type = 'base'
-        """
-    )
-    prods: dict[int, dict] = {}
-    for r in cur.fetchall():
-        d = prods.setdefault(r["pid"], {"title": r["title"], "our": r["our"], "shops": {}})
-        d["shops"][r["shop"]] = r["cp"]
 
     items: list[dict] = []
-    for d in prods.values():
-        prices = {s: d["shops"].get(s) for s in shops}
-        pv = {s: p for s, p in prices.items() if p is not None}
-        mn = min(pv.values()) if pv else None
-        mn_shop = SHOP_LABEL.get(min(pv, key=pv.get), min(pv, key=pv.get)) if pv else ""
-        our = d["our"]
+    for rows in store._base_families(conn):
+        rep = min(rows, key=lambda r: (r["price"] is None, r["price"] or 0))
+        comps = _dedup_comps(store.competitors_for(conn, rep))
+        pv: dict[str, int] = {}
+        for c in comps:
+            if (c["price"] is not None and c.get("sim_ok", True)
+                    and (c["shop"] not in pv or c["price"] < pv[c["shop"]])):
+                pv[c["shop"]] = c["price"]
+        if not pv:
+            continue                        # без конкурентов в выгрузке делать нечего
+        prices = {s: pv.get(s) for s in shops}
+        mn = min(pv.values())
+        mn_shop = SHOP_LABEL.get(min(pv, key=pv.get), min(pv, key=pv.get))
+        our = rep["price"]
         if our is None:
             status, gap = "под заказ", None
-        elif mn is None:
-            status, gap = "нет данных", None
         elif our > mn:
             status, gap = "🔴 дороже всех", our - mn
         elif our < mn:
             status, gap = "🟢 дешевле всех", our - mn
         else:
             status, gap = "⚪ наравне", 0
-        items.append({"title": _short_title(d["title"]), "our": our, "prices": prices,
-                      "mn": mn, "mn_shop": mn_shop, "gap": gap, "status": status})
+        sim_tag = _SIM_TAG.get(sim_type_of(rep["title"]), "")
+        items.append({"title": _short_title(rep["title"]) + sim_tag, "our": our,
+                      "prices": prices, "mn": mn, "mn_shop": mn_shop,
+                      "gap": gap, "status": status})
     # сначала где сильнее проигрываем (положительный gap), потом остальное
     items.sort(key=lambda x: (x["gap"] if x["gap"] is not None else -10**9), reverse=True)
     return shops, items
@@ -402,7 +458,7 @@ def build_export_xlsx(conn) -> str:
     from openpyxl.utils import get_column_letter
 
     shops, items = _comparison_rows(conn)
-    money = '# ##0" ₽";;0'
+    money = '# ##0" ₽";-# ##0" ₽";0'      # отрицательная наценка видима (мы дешевле)
     red = PatternFill("solid", fgColor="FFC7CE")
     green = PatternFill("solid", fgColor="C6EFCE")
     yellow = PatternFill("solid", fgColor="FFEB9C")
@@ -471,12 +527,64 @@ def render_top(conn, limit: int = 15) -> str:
     return "\n".join(lines)
 
 
-def trigger_heavy_refresh() -> None:
-    """Запустить тяжёлый сбор (Яндекс/Instagram) отдельным процессом — бот не виснет."""
+def _bar(done: int, total: int, width: int = 10) -> str:
+    """Текстовый прогресс-бар: [██████░░░░]."""
+    filled = round(width * done / total) if total else 0
+    return "[" + "█" * filled + "░" * (width - filled) + "]"
+
+
+# Кнопка ручного обновления статус-бара (callback edit'ит то же сообщение).
+_STATUS_BTN = [("🔄 Обновить статус", "status")]
+_STEP_ICON = {"pending": "⬜", "running": "⏳", "done": "✅", "fail": "⚠️"}
+
+
+def render_progress(conn) -> str:
+    """Статус-бар текущего сбора цен (для /status и кнопки под /refresh)."""
+    p = store.progress_read(conn)
+    if not p:
+        return ("Сбор цен ещё не запускался в этой сессии.\n"
+                "Он идёт по расписанию каждые ~3 часа; запустить вручную — /refresh (админ).")
+    steps = p["steps"]
+    total = len(steps)
+    done = sum(1 for s in steps if s["status"] in ("done", "fail"))
+    running = not p["finished_at"]
+    if running:
+        head = f"🔄 Обновление цен идёт (запущено {fmt_ago(p['started_at'])})"
+    else:
+        head = f"✅ Обновление завершено {fmt_ago(p['finished_at'])}"
+    lines = [head, f"{_bar(done, total)} {done}/{total} источников", ""]
+    for s in steps:
+        label = SHOP_LABEL.get(s["shop"], s["shop"])
+        if s["status"] == "done":
+            tail = f" — {fmt_int(s['n'])} тов." if s["n"] is not None else " — готово"
+        elif s["status"] == "fail":
+            tail = " — не собрался"
+        elif s["status"] == "running":
+            tail = " — собираю…"
+        else:
+            tail = ""
+        lines.append(f"{_STEP_ICON.get(s['status'], '⬜')} {label}{tail}")
+    if not running:
+        lines.append("\nЦены обновлены — просто спроси товар.")
+    return "\n".join(lines)
+
+
+def trigger_heavy_refresh() -> bool:
+    """Запустить тяжёлый сбор отдельным процессом — бот не виснет. False = уже идёт.
+
+    Guard от параллельных прогонов (двойной тап /refresh или наложение на cron):
+    два collector'а interleaved-заменяют магазины и рвут привязки dipark_id.
+    Вывод — в общий collector.log (DEVNULL делал ручные прогоны неотлаживаемыми).
+    """
+    if subprocess.run(["pgrep", "-f", "mvp7_price_scout.collector"],
+                      capture_output=True).returncode == 0:
+        return False
+    log = open(Path(ROOT) / "mvp7_price_scout" / "collector.log", "ab")
     subprocess.Popen(
         [sys.executable, "-m", "mvp7_price_scout.collector", "--heavy"],
-        cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        cwd=ROOT, stdout=log, stderr=log,
     )
+    return True
 
 
 def _product_reply(conn, base_row: dict) -> Reply:
@@ -485,7 +593,11 @@ def _product_reply(conn, base_row: dict) -> Reply:
 
 
 def _query_has_storage(conn, query: str) -> bool:
-    """Указан ли в запросе объём («256»/«1tb») — тогда семья определяется однозначно."""
+    """Указан ли в запросе объём («256»/«1tb») ПЛЮС модель — семья однозначна.
+
+    Голый объём («256») без модель-токена карточку не открывает: под 256gb
+    подходят десятки семей, «уверенный» ответ был бы случайным товаром.
+    """
     qk = model_key(query)
     if not qk:
         return False
@@ -493,7 +605,9 @@ def _query_has_storage(conn, query: str) -> bool:
     if not cands:
         return False
     vocab = set().union(*(set(r["model_key"].split()) for r in cands))
-    return any(t.endswith(("gb", "tb")) for t in _qtokens(qk, vocab))
+    toks = _qtokens(qk, vocab)
+    return (any(t.endswith(("gb", "tb")) for t in toks)
+            and any(not t.endswith(("gb", "tb")) for t in toks))
 
 
 def handle_text(conn, text: str, is_admin: bool) -> Reply:
@@ -509,15 +623,19 @@ def handle_text(conn, text: str, is_admin: bool) -> Reply:
 
     if low in ("/start", "/help", "start", "help", "помощь"):
         return Reply(HELP)
-    if low.startswith("/top"):
+    if re.match(r"/top(@|\s|$)", low):       # не ловить «/topsecret»
         return Reply(render_top(conn))
-    if low.startswith("/stats"):
+    if re.match(r"/stats(@|\s|$)", low):
         return Reply(render_stats(conn))
-    if low.startswith("/refresh"):
+    if re.match(r"/status(@|\s|$)", low):
+        return Reply(render_progress(conn), _STATUS_BTN)
+    if re.match(r"/refresh(@|\s|$)", low):
         if not is_admin:
             return Reply("Команда /refresh доступна только администратору.")
-        trigger_heavy_refresh()
-        return Reply("🔄 Запустил обновление цен конкурентов. Минуту-другую — потом просто спроси товар.")
+        if not trigger_heavy_refresh():
+            return Reply(render_progress(conn), _STATUS_BTN)      # уже идёт — покажи прогресс
+        return Reply("🔄 Запустил обновление цен конкурентов.\n"
+                     "Жми кнопку — покажу прогресс по источникам.", _STATUS_BTN)
     if text.startswith("/"):
         return Reply("Неизвестная команда. /help — список.")
 
@@ -545,6 +663,8 @@ def handle_callback(conn, data: str) -> Reply | None:
     что кнопки в старых сообщениях протухают. На неизвестный id — не молчим, а
     просим переспросить (иначе мёртвый тап без реакции).
     """
+    if data == "status":                     # кнопка «Обновить статус» под /refresh
+        return Reply(render_progress(conn), _STATUS_BTN)
     if not data or not data.startswith("p:"):
         return None
     try:

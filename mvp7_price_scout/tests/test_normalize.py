@@ -56,21 +56,37 @@ def test_compound_color_after_storage_dropped():
     assert plain == mist == cosmic == "17 iphone 256gb"
 
 
-def test_ram_rom_not_leaked():
-    """RAM перед объёмом не должен попадать в ключ (12/512 -> 512gb, без 12)."""
+def test_ram_in_key_as_soft_token():
+    """RAM в ключе отдельным токеном ram12 (различает SKU), голое «12» не течёт."""
     a = model_key("POCO M8 Pro 5G 12/512Gb Black")
     b = model_key("POCO M8 Pro 5G 512GB")
-    assert a == b
-    assert "12" not in a.split()
+    assert "12" not in a.split() and "ram12" in a.split()
+    assert a != b                       # 12/512 и просто 512 — разные ключи
+    # но конкурент, не указавший RAM, всё равно матчится (fuzzy, ram вне guard'а)
+    from mvp7_price_scout.match import build_index, match_one
+    idx = build_index([{"id": 1, "title": "POCO M8 Pro 5G 12/512Gb Black",
+                        "model_key": a, "storage": "512gb", "price": 30000}])
+    pid, _ = match_one(Product(shop="x", title="POCO M8 Pro 5G 512GB", price=29000), idx)
+    assert pid == 1
 
 
 def test_sim_type_detection():
-    assert sim_type_of("Apple iPhone 17 256Gb White (Sim+E-Sim)") == "physical"
-    assert sim_type_of("iPhone 17 256Gb (Nano-SIM + eSIM)") == "physical"
+    assert sim_type_of("Apple iPhone 17 256Gb White (Sim+E-Sim)") == "sim_esim"
+    assert sim_type_of("iPhone 17 256Gb (Nano-SIM + eSIM)") == "sim_esim"
     assert sim_type_of("iPhone 17 256Gb eSIM") == "esim"
     assert sim_type_of("iPhone 17 256Gb e-sim only") == "esim"
     assert sim_type_of("Apple iPhone 17 256Gb White") is None       # SIM не указан
     assert sim_type_of("iPhone 17 256Gb Starlight") is None          # цвет не ловится как sim
+
+
+def test_sim_type_three_groups():
+    """Жёсткое разделение на 3 несовместимые группы + краевые случаи."""
+    assert sim_type_of("iPhone 17 Pro 256Gb 2 nano-SIM") == "dual_sim"     # Китай: 2 физ. SIM
+    assert sim_type_of("iPhone 17 Pro 256Gb Dual SIM") == "dual_sim"
+    assert sim_type_of("iPhone 17 Pro 256Gb Dual eSIM") == "esim"          # 2×eSIM = eSIM-группа
+    assert sim_type_of("iPhone 17 Pro 256Gb Nano-SIM + eSIM") == "sim_esim"
+    # sim_esim и dual_sim — разные SKU, сравнивать их цены нельзя
+    assert sim_type_of("iPhone 17 256Gb (Sim+E-Sim)") != sim_type_of("iPhone 17 256Gb 2 nano-SIM")
 
 
 def test_collapse_splits_by_sim_type():
@@ -131,6 +147,85 @@ def test_parse_price():
     assert parse_price("по запросу") is None
     assert parse_price("") is None
     assert parse_price(None) is None
+
+
+def test_single_digit_model_number_kept():
+    """AirPods Pro 2 и Pro 3 — разные товары: однозначная цифра модели не выпадает."""
+    a = model_key("Apple AirPods Pro 2")
+    b = model_key("Apple AirPods Pro 3")
+    assert a != b and "2" in a.split() and "3" in b.split()
+    assert "2" in model_key("Apple Watch Ultra 2 49mm").split()
+
+
+def test_watch_colors_do_not_split_family():
+    """Цвет и материал корпуса часов не текут в ключ — семья одна."""
+    a = model_key("Apple Watch S10 46mm Rose Gold")
+    b = model_key("Apple Watch S10 46mm Jet Black")
+    c = model_key("Apple Watch S10 46mm Silver")
+    assert a == b == c
+    assert model_key("Apple Watch SE2 40mm Midnight Aluminium") == \
+        model_key("Apple Watch SE2 40mm Midnight")
+
+
+def test_color_of_fallback_without_storage():
+    """Без якоря объёма (часы, наушники) цвет берётся из словаря цвет-слов."""
+    assert color_of("Apple Watch S10 46mm Rose Gold") == "rose gold"
+    assert color_of("Apple EarPods 3.5mm проводные белые") == "белые"
+    assert color_of("Apple Pencil Pro") is None
+
+
+def test_pro_plus_is_not_pro():
+    """«Pro+» и «Pro» — разные модели: плюс не должен стираться пунктуацией."""
+    plus = model_key("Xiaomi Redmi Note 15 Pro+ 5G 8/256Gb Mocha Brown")
+    pro = model_key("Xiaomi Redmi Note 15 Pro 5G 8/256Gb Black")
+    assert plus != pro and "plus" in plus.split()
+    # а вот «Sim+E-Sim» плюсом модели не считается
+    assert "plus" not in model_key("Apple iPhone 17 256Gb White (Sim+E-Sim)").split()
+
+
+def test_ram_distinguishes_sku():
+    """8/256 и 12/256 — разные товары с разной ценой, не схлопывать."""
+    a = model_key("Realme 15 5G 8/256Gb Silk Pink")
+    b = model_key("Realme 15 5G 12/256Gb Silk Pink")
+    assert a != b and "ram8" in a.split() and "ram12" in b.split()
+    out = collapse_variants([
+        Product(shop="di-park", title="Realme 15 5G 8/256Gb Silk Pink", price=22490),
+        Product(shop="di-park", title="Realme 15 5G 12/256Gb Silk Pink", price=25490),
+    ])
+    assert len(out) == 2
+
+
+def test_watch_series_written_differently_same_key():
+    """Series 11 / S11, SE (Gen.2) / SE2, «42 mm»/«42mm» — один товар у разных магазинов."""
+    assert model_key("Apple Watch Series 11, 42 mm") == model_key("Apple Watch S11 42mm")
+    assert model_key("Apple Watch SE (Gen.2) 40mm") == model_key("Apple Watch SE2 40mm")
+    assert model_key("Apple Watch Series 11 42 мм") == model_key("Apple Watch S11 42mm")
+
+
+def test_year_and_generation_words_dropped():
+    assert model_key("MacBook Air M4 2025 256Gb") == model_key("MacBook Air M4 256Gb")
+    assert model_key("AirPods Pro (2nd generation)") == model_key("Apple AirPods Pro 2")
+
+
+def test_sim_type_cyrillic_and_color_boundary():
+    assert sim_type_of("айфон 17 256 сим+есим") == "sim_esim"
+    assert sim_type_of("17 256 две симки") == "dual_sim"          # две физ. SIM, без eSIM
+    assert sim_type_of("17 256 есим") == "esim"
+    # «Blue Sim+eSIM»: «e» из цвета не должна давать ложный esim-only
+    assert sim_type_of("Apple iPhone 17 256GB Mist Blue Sim+eSIM") == "sim_esim"
+
+
+def test_used_detects_rfb_copy_showcase():
+    assert is_used("iPhone 15 Pro 512Gb Black (2 Sim) (RFB)")
+    assert is_used("EarPods Type-C (Люкс копия)")
+    assert is_used("Смартфон витринный экземпляр")
+    assert is_used("iPhone 14 128Gb Новый Актив")
+
+
+def test_lte_is_separate_variant():
+    wifi = model_key("iPad Air 11 M3 128Gb Wi-Fi")
+    lte = model_key("iPad Air 11 M3 128Gb LTE")
+    assert wifi != lte and "cellular" in lte.split()
 
 
 def test_product_autofills_key_and_storage():

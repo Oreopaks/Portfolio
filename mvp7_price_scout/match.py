@@ -20,11 +20,24 @@ from mvp7_price_scout.normalize import Product, sim_type_of
 MIN_RATIO = 55
 
 # Токены, различающие модель внутри линейки. Должны совпадать у пары точно.
-_VARIANT = {"pro", "max", "plus", "ultra", "mini", "air", "se", "fe", "lite", "neo"}
+# cellular — LTE-версия планшета (другой товар); duo/дуо — Станция Дуо != Станция.
+_VARIANT = {"pro", "max", "plus", "ultra", "mini", "air", "se", "fe", "lite", "neo",
+            "cellular", "duo", "дуо"}
+
+# Тип товара: аксессуар не должен матчиться к устройству (и наоборот) — иначе
+# «AirPods Pro 3» конкурента прилипал к нашему ЧЕХЛУ для AirPods Pro 3 (score 55),
+# «Xbox Series X» — к геймпаду, часы CMF — к наушникам CMF.
+_KIND = {"чехол", "чехлы", "геймпад", "станция", "колонка", "часы", "watch",
+         "buds", "ремешок", "стекло", "кабель", "зарядка", "зарядное", "адаптер",
+         "пленка", "док", "мышь", "клавиатура"}
 
 
 def _variants(model_key: str) -> frozenset[str]:
     return frozenset(t for t in model_key.split() if t in _VARIANT)
+
+
+def _kinds(model_key: str) -> frozenset[str]:
+    return frozenset(t for t in model_key.split() if t in _KIND)
 
 
 def _id_tokens(model_key: str, storage: str | None) -> frozenset[str]:
@@ -32,10 +45,12 @@ def _id_tokens(model_key: str, storage: str | None) -> frozenset[str]:
 
     Критичны: token_sort_ratio считает «16» и «17» почти одинаковыми (1 символ),
     поэтому iPhone 16 ложно матчился к 17, Galaxy S24 к S25. Требуем точного
-    совпадения этого набора.
+    совпадения этого набора. Токен RAM (ram8) исключаем: он различает наши SKU
+    в каталоге, но конкурент часто пишет без RAM — жёсткий guard рвал бы матч.
     """
     return frozenset(t for t in model_key.split()
-                     if any(c.isdigit() for c in t) and t != storage)
+                     if any(c.isdigit() for c in t) and t != storage
+                     and not t.startswith("ram"))
 
 
 def _core_alpha(model_key: str) -> frozenset[str]:
@@ -90,12 +105,15 @@ def match_one(prod: Product, index: dict, min_ratio: int = MIN_RATIO) -> tuple[i
             return _cheapest(ok)["id"], 100
     pk = prod.model_key
     pv, pids, pca = _variants(pk), _id_tokens(pk, prod.storage), _core_alpha(pk)
+    pkind = _kinds(pk)
     best: dict | None = None
     best_score = 0
     for row in index["by_storage"].get(prod.storage, []):
         if not _sim_ok(psim, row["sim_type"]):               # eSIM-only vs Sim+E-Sim
             continue
         rk = row["model_key"]
+        if _kinds(rk) != pkind:                              # чехол != наушники != часы
+            continue
         if _variants(rk) != pv:                              # pro/max/ultra/plus...
             continue
         if _id_tokens(rk, row.get("storage")) != pids:       # 16 vs 17, s24 vs s25

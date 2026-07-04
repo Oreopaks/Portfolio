@@ -18,9 +18,11 @@
 
 ```
 collector (cron) di-park ─┐
-                 sr57 ─────┼ collapse цветов ─ match к каталогу di-park ─ SQLite ─ алерты админу
-                 iprice ───┤
-                 ispace ───┤   (--heavy:)  repremium (Playwright), Instagram (сессия+OCR)
+                 sr57 ─────┤
+                 iprice ───┼ collapse цветов ─ match к каталогу di-park ─ SQLite ─ алерты админу
+                 ispace ───┤
+                 kingstore ┤
+                 mobilax ──┘   (--heavy:)  repremium (Playwright), Instagram (сессия+OCR)
 bot (long-poll)  запрос ─ fuzzy-поиск по каталогу di-park ─ таблица из SQLite
 ```
 
@@ -47,7 +49,7 @@ IG_SETTINGS=mvp7_price_scout/ig_session.json
 ## Запуск
 
 ```bash
-.venv/bin/python -m mvp7_price_scout.collector            # быстрый сбор (sr57, iprice, ispace)
+.venv/bin/python -m mvp7_price_scout.collector            # быстрый сбор (sr57, iprice, ispace, kingstore, mobilax)
 .venv/bin/python -m mvp7_price_scout.collector --heavy    # + repremium (Playwright) + Instagram
 .venv/bin/python -m mvp7_price_scout.bot                  # бот (foreground)
 bash mvp7_price_scout/run_bot.sh                          # бот в фоне (nohup, переживает терминал)
@@ -59,17 +61,22 @@ bash mvp7_price_scout/run_bot.sh                          # бот в фоне (
 перезагрузки — добавить watchdog в cron (см. ниже).
 
 Команды бота: `<товар>`, `/top`, `/stats`, `/export`, `/refresh` (админ, запускает
-тяжёлый сбор), `/id`, `/help`.
+тяжёлый сбор), `/status` (прогресс сбора — статус-бар по источникам, кнопка
+«Обновить» перерисовывает то же сообщение), `/id`, `/help`.
 
 ### Расписание (cron)
 
-Открыть `crontab -e` и добавить:
+Ставится скриптом (идемпотентно): `bash mvp7_price_scout/setup_cron.sh`
+
+Фактическая схема (как в setup_cron.sh):
 ```cron
-# бот всегда живой (поднимет после краша/перезагрузки)
-* * * * *    pgrep -f mvp7_price_scout.bot >/dev/null || bash /home/oleg/freelance-mvp/mvp7_price_scout/run_bot.sh
-# сбор цен
-0 */3 * * *  cd /home/oleg/freelance-mvp && .venv/bin/python -m mvp7_price_scout.collector
-30 6 * * *   cd /home/oleg/freelance-mvp && .venv/bin/python -m mvp7_price_scout.collector --heavy
+# сбор цен: каждые 3 часа, сразу со ВСЕМИ источниками (--heavy включает
+# repremium/Instagram; alerts сравнивают с прошлым прогоном — раздельное
+# расписание лёгкий/тяжёлый ломало бы историю пар для heavy-магазинов)
+0 */3 * * *  cd /home/oleg/freelance-mvp && .venv/bin/python -m mvp7_price_scout.collector --heavy >> mvp7_price_scout/collector.log 2>&1
+# бот всегда живой (автозапуск после ребута + перезапуск после краша)
+@reboot      /home/oleg/freelance-mvp/mvp7_price_scout/run_bot.sh >/dev/null 2>&1
+*/5 * * * *  /home/oleg/freelance-mvp/mvp7_price_scout/run_bot.sh >/dev/null 2>&1
 ```
 
 ## Статус источников
@@ -80,9 +87,11 @@ bash mvp7_price_scout/run_bot.sh                          # бот в фоне (
 | **sr57.ru** | конкурент | WooCommerce, requests+bs4 | ✅ |
 | **iprice.store** | конкурент | Webasyst, requests+bs4 | ✅ |
 | **orel.ispace-shop.ru** | конкурент | Bitrix, цены на страницах товаров (в листингах скрыты) | ✅ частично* |
+| **oryol.kingstore.link** | конкурент | Bitrix, цены в data-атрибутах листинга | ✅ |
+| **мобилакс.рф** (МобилАкс) | конкурент | Webasyst, requests+bs4; mobileax.ru за Cloudflare — берём зеркало `.рф` | ✅ |
 | **repremium.ru** | конкурент | Bitrix/aspro, грид через **Playwright** (--heavy) | ✅ |
 | **Instagram @smart_room_57** | конкурент | instagrapi сессия + OCR (--heavy) | ✅ нужна сессия** |
-| Яндекс ×2 (Kingstore, Rem-gsm) | — | — | ❌ исключены*** |
+| Яндекс-профили (Kingstore-профиль, Rem-gsm) | — | — | ❌ исключены*** |
 
 \* ispace прячет цены в листингах («Цена при оплате наличными») — тянем страницы
 товаров из блока «популярное» (частичное покрытие популярных позиций).

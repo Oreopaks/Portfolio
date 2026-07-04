@@ -30,6 +30,7 @@ from mvp7_price_scout.sources.dipark_source import fetch_dipark_catalog
 from mvp7_price_scout.sources.iprice_source import fetch_iprice
 from mvp7_price_scout.sources.ispace_source import fetch_ispace
 from mvp7_price_scout.sources.kingstore_source import fetch_kingstore
+from mvp7_price_scout.sources.mobilax_source import fetch_mobilax
 from mvp7_price_scout.sources.repremium_source import fetch_repremium
 from mvp7_price_scout.sources.sr57_source import fetch_sr57
 
@@ -45,6 +46,7 @@ STATIC_SOURCES: list[tuple[str, callable]] = [
     ("iprice", fetch_iprice),       # Webasyst
     ("ispace", fetch_ispace),       # Bitrix (страницы товаров, цены скрыты в листингах)
     ("kingstore", fetch_kingstore), # Bitrix (цены в data-атрибутах карточек листинга)
+    ("mobilax", fetch_mobilax),     # Webasyst (зеркало мобилакс.рф, mobileax.ru за Cloudflare)
 ]
 # Тяжёлые (Playwright/instagrapi+OCR) — только --heavy, реже / по /refresh.
 # Яндекс-профили исключены: отдают услуги/витрину, не каталог телефонов (см. README).
@@ -52,6 +54,12 @@ HEAVY_SOURCES: list[tuple[str, callable]] = [
     ("repremium", fetch_repremium),          # Bitrix aspro, грид через Playwright
     ("smart_room_57", _fetch_instagram),     # Instagram, нужна сессия (IG_SETTINGS)
 ]
+
+
+# Пороги health-проверки «источник протух»: cron ходит каждые RUN_EVERY_HOURS,
+# алертим при возрасте цен > STALE_HOURS (двух пропущенных прогонов достаточно).
+RUN_EVERY_HOURS = 3
+STALE_HOURS = 8
 
 
 def _now() -> str:
@@ -76,13 +84,27 @@ def _new_only(products: list[Product]) -> list[Product]:
 
 
 def collect_base(conn) -> list[dict]:
-    """Собрать каталог эталона di-park -> база. Вернуть base_catalog для матчинга."""
+    """Собрать каталог эталона di-park -> база. Вернуть base_catalog для матчинга.
+
+    Guard: подозрительно малый сбор (сайт лёг, sitemap недоступен) НЕ затирает
+    каталог — иначе один сбой di-park опустошает базу и отвязывает всех
+    конкурентов до следующего удачного прогона, а бот отвечает «не нашёл» на всё.
+
+    upsert_base (не replace_shop!): id эталона стабильны между прогонами — на
+    них ссылаются price_log (алерты), dipark_id конкурентов и callback-кнопки.
+    """
     prods = collapse_variants(_new_only(fetch_dipark_catalog()))
+    old_n = conn.execute(
+        "SELECT COUNT(*) FROM products WHERE source_type = 'base'").fetchone()[0]
+    if old_n >= 50 and len(prods) < old_n * 0.5:
+        notify.send_admins(
+            f"🚨 <b>Сбор di-park подозрительно мал</b>: {len(prods)} товаров "
+            f"(было {old_n}). Каталог не тронут, прогон отменён — см. collector.log.")
+        raise RuntimeError(f"di-park вернул {len(prods)} < 50% от {old_n} — эталон не обновляю")
     for p in prods:
         p.source_type = "base"
     _stamp(prods)
-    n = store.replace_shop(conn, "di-park", prods)
-    store.link_base_self(conn)
+    n = store.upsert_base(conn, prods)
     print(f"[collector] di-park (эталон): {n} товаров")
     return store.base_catalog(conn)
 
@@ -101,13 +123,28 @@ def collect_competitor(conn, shop: str, fetch_fn: callable, base_rows: list[dict
 def run(heavy: bool = False, db: str | None = None) -> None:
     conn = store.connect(db)
     run_ts = _now()
-    base_rows = collect_base(conn)
-    all_comp: list[Product] = []
     sources = STATIC_SOURCES + (HEAVY_SOURCES if heavy else [])
+    # трек прогресса для статус-бара бота (/status): di-park + все источники прогона
+    store.progress_start(conn, ["di-park"] + [s for s, _ in sources], run_ts, heavy)
+    try:
+        store.progress_mark(conn, "di-park", "running")
+        base_rows = collect_base(conn)
+        store.progress_mark(conn, "di-park", "done", len(base_rows))
+    except Exception as e:      # эталон не собрался — работаем на старых данных
+        store.progress_mark(conn, "di-park", "fail")
+        store.progress_finish(conn, _now())
+        print(f"[collector] эталон di-park упал, прогон отменён: {e}")
+        conn.close()
+        return
+    all_comp: list[Product] = []
     for shop, fn in sources:
+        store.progress_mark(conn, shop, "running")
         try:
-            all_comp += collect_competitor(conn, shop, fn, base_rows)
+            kept = collect_competitor(conn, shop, fn, base_rows)
+            all_comp += kept
+            store.progress_mark(conn, shop, "done", len(kept))
         except Exception as e:  # источник может упасть — не валим весь прогон
+            store.progress_mark(conn, shop, "fail")
             print(f"[collector] {shop} упал: {e}")
 
     # Алерты: сравнить с прошлым прогоном ДО записи текущего среза в историю.
@@ -125,21 +162,44 @@ def run(heavy: bool = False, db: str | None = None) -> None:
     try:
         cur_counts = {r["shop"]: (r["n"], r["with_price"])
                       for r in store.stats(conn) if r["source_type"] != "base"}
+        for shop, _fn in sources:
+            # источник, не давший НИ строки ни разу (IG без сессии), отсутствует
+            # и в stats, и в прошлых прогонах — фиксируем нулём, чтобы история
+            # была честной и переход 0 -> >0 -> 0 ловился
+            cur_counts.setdefault(shop, (0, 0))
         prev = store.previous_source_counts(conn, run_ts)
         # union: источник, вернувший 0, вычищается из products и пропадает из stats —
         # именно его (iprice=0) и надо поймать, поэтому идём и по прошлым магазинам.
         drops = []
         for shop in set(cur_counts) | set(prev):
-            n = cur_counts.get(shop, (0, 0))[0]
-            pn = prev.get(shop, (0, 0))[0]
+            n, wp = cur_counts.get(shop, (0, 0))
+            pn, pwp = prev.get(shop, (0, 0))
             if pn and (n == 0 or n < pn * 0.5):
                 drops.append(f"⚠️ <b>{shop}</b>: {n} товаров (было {pn}) — источник отвалился или сломался.")
+            elif pwp and n and wp == 0:
+                drops.append(f"⚠️ <b>{shop}</b>: товары есть, но ни одной цены "
+                             f"(было {pwp} с ценой) — вёрстка цен уехала.")
+        # источник, падающий ИСКЛЮЧЕНИЕМ, оставляет в базе старые строки — счётчик
+        # не меняется и верхние проверки молчат хоть неделю. Ловим по возрасту
+        # последнего сбора; окно = один интервал cron, чтобы не спамить каждый прогон.
+        for r in store.stats(conn):
+            if r["source_type"] == "base" or not r["last"]:
+                continue
+            try:
+                age_h = (datetime.now() - datetime.fromisoformat(r["last"])).total_seconds() / 3600
+            except ValueError:
+                continue
+            if STALE_HOURS < age_h <= STALE_HOURS + RUN_EVERY_HOURS:
+                drops.append(f"⚠️ <b>{r['shop']}</b>: цены не обновлялись {int(age_h)}ч — "
+                             f"источник падает (см. collector.log).")
         if drops:
             notify.send_admins("🚨 <b>Проблема сбора цен</b>\n\n" + "\n".join(drops))
             print(f"[collector] health-алертов: {len(drops)}")
         store.record_source_counts(conn, run_ts, cur_counts)
     except Exception as e:
         print(f"[collector] health-проверка упала: {e}")
+
+    store.progress_finish(conn, _now())     # статус-бар: сбор завершён
 
     print("\n=== срез базы (магазин / тип / товаров / с ценой / обновлено) ===")
     for r in store.stats(conn):

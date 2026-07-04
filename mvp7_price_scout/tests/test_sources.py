@@ -1,6 +1,7 @@
-"""Тесты чистых HTML-парсеров источников (без сети): sr57, iprice, kingstore, repremium."""
+"""Тесты чистых HTML-парсеров источников (без сети): sr57, iprice, kingstore, repremium, mobilax."""
 from mvp7_price_scout.sources.iprice_source import parse_iprice
 from mvp7_price_scout.sources.kingstore_source import parse_kingstore
+from mvp7_price_scout.sources.mobilax_source import parse_mobilax
 from mvp7_price_scout.sources.repremium_source import parse_repremium
 from mvp7_price_scout.sources.sr57_source import parse_sr57
 
@@ -134,8 +135,52 @@ def test_parse_repremium_skips_obmen_and_demo():
     assert p.url.endswith("_siniy/")           # именно новый, не обменка/demo
 
 
+# Реальная разметка листинга мобилакс.рф (Webasyst Shop-Script + schema.org), сокращённая.
+MOBILAX_HTML = """
+<div class="products__item" itemscope itemtype="http://schema.org/Product">
+  <a href="/apple-iphone-17-pro-max-256gb-cosmic-orange-novyy/">
+    <div class="products__item-info">
+      <span class="products__item-info-name" itemprop="name">Apple iPhone 17 Pro Max 256Gb Cosmic Orange (NEW)</span>
+    </div>
+  </a>
+  <div class="products__bottom">
+    <meta itemprop="price" content="102990">
+    <div class="products__available"><div class="products__available-in-stock">Доступно</div></div>
+    <div class="products__price"><div class="products__price-new">102 990 <span class="ruble">&#8381;</span></div></div>
+  </div>
+</div>
+<div class="products__item" itemscope itemtype="http://schema.org/Product">
+  <a href="/apple-iphone-16-128gb-black/">
+    <div class="products__item-info">
+      <span class="products__item-info-name" itemprop="name">Apple iPhone 16 128Gb Black</span></div>
+  </a>
+  <div class="products__bottom">
+    <div class="products__available">Нет в наличии</div>
+    <div class="products__price"><div class="products__price-new">64 990 <span class="ruble">&#8381;</span></div></div>
+  </div>
+</div>
+"""
+
+
+def test_parse_mobilax_price_stock_url():
+    prods = parse_mobilax(MOBILAX_HTML)
+    assert len(prods) == 2
+    by_title = {p.title: p for p in prods}
+
+    p1 = by_title["Apple iPhone 17 Pro Max 256Gb Cosmic Orange (NEW)"]
+    assert p1.shop == "mobilax" and p1.price == 102990        # из itemprop=price (чистое целое)
+    assert p1.url == "https://xn--80abvjddo3a.xn--p1ai/apple-iphone-17-pro-max-256gb-cosmic-orange-novyy/"
+    assert p1.in_stock is True
+    assert p1.storage == "256gb"                              # объём вытащил normalize
+
+    p2 = by_title["Apple iPhone 16 128Gb Black"]
+    assert p2.price == 64990                                  # фолбэк на .products__price-new
+    assert p2.in_stock is False                               # «Нет в наличии»
+
+
 def test_parse_empty_html_no_crash():
     assert parse_sr57("") == []
     assert parse_iprice("") == []
     assert parse_kingstore("") == []
     assert parse_repremium("") == []
+    assert parse_mobilax("") == []

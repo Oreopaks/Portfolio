@@ -52,8 +52,12 @@ def parse_offer(html: str, url: str = "") -> Product | None:
         title = clean_title(url.strip("/").split("/")[-1].replace("_", " "))
     if not title:
         return None
+    # зачёркнутые/старые цены и рассрочка «от N ₽/мес» — вон до извлечения
+    for bad in soup.select("del, s, [class*=old-price], [class*=price-old], [class*=oldprice], [class*=discount]"):
+        bad.decompose()
     price = None
-    for el in soup.select(".price, [class*=price]"):     # первый элемент с числом
+    # сначала точный селектор итоговой цены, потом фолбэк по классам
+    for el in soup.select(".good__total-price, .price, [class*=price]"):
         price = parse_price(el.get_text())
         if price:
             break
@@ -98,11 +102,14 @@ def fetch_ispace(max_products: int = 300, throttle: float = 0.3) -> list[Product
     out: list[Product] = []
     for url in urls:
         try:
-            html = http.get(url, timeout=25).text
+            r = http.get(url, timeout=25)
         except Exception as e:
             print(f"[ispace] {url}: {e}")
             continue
-        p = parse_offer(html, url)
+        # снятый товар редиректит на листинг — там первое «число с ценой» мусорное
+        if r.status_code != 200 or r.url.rstrip("/") != url.rstrip("/"):
+            continue
+        p = parse_offer(r.text, url)
         if p and p.price:
             out.append(p)
         time.sleep(throttle)

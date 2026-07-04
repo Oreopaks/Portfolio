@@ -27,6 +27,9 @@ _TARGET = re.compile(r"smart|iphone|apple|samsung|xiaomi|redmi|poco|honor|realme
 def parse_iprice(html: str) -> list[Product]:
     """HTML категории Webasyst -> [Product]. Без сети."""
     soup = BeautifulSoup(html or "", "html.parser")
+    # зачёркнутые/старые цены — вон, иначе при акционной разметке возьмём старую
+    for bad in soup.select("del, s, [class*=old-price], [class*=price-old], [class*=oldprice], [class*=discount]"):
+        bad.decompose()
     out: list[Product] = []
     for it in soup.select(".js-product-item"):
         name_el = it.select_one(".product-list__name") or it.select_one(".product-list__title")

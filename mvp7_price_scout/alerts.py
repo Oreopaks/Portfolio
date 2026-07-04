@@ -28,6 +28,7 @@ def compute_alerts(conn, run_ts: str) -> list[str]:
                c.shop AS shop, MIN(c.price) AS cp, c.source_type AS st
         FROM products b
         JOIN products c ON c.dipark_id = b.id AND c.source_type != 'base'
+                       AND c.in_stock = 1
         WHERE b.source_type = 'base' AND c.price IS NOT NULL
         GROUP BY b.id, c.shop
         """

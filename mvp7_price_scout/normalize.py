@@ -33,7 +33,7 @@ class Product:
     source_type: str = "site"       # base | site | yandex | ig | ig_ocr
     model_key: str = ""             # канон для сравнения (см. model_key())
     storage: str | None = None      # "256gb"/"1tb" — признак для guard'а матчинга
-    sim_type: str | None = None     # "esim"/"physical"/None — guard матчинга (см. sim_type_of)
+    sim_type: str | None = None     # "esim"/"sim_esim"/"dual_sim"/None — guard матчинга (см. sim_type_of)
     color: str | None = None        # канон цвета (см. color_of) — для per-color цены нашего каталога
     fetched_at: str = ""            # ISO-время сбора (ставит collector)
     dipark_id: int | None = None    # id товара-эталона, к которому привязан
@@ -60,6 +60,19 @@ _STOP = {
     # шумовые слова витрин/соцсетей (часто в подписях IG/заголовках)
     "наличии", "наличие", "налич", "акция", "скидка", "хит", "новинка",
     "заказ", "доставка", "рассрочка", "кредит", "топ", "распродажа",
+    # материал корпуса (часы) — не различает товар, а названия магазинов разнятся
+    "aluminium", "aluminum", "алюминий", "алюминиевый",
+    # описательный шум витрин у аксессуаров («Беспроводные наушники AirPods Pro
+    # (3-го поколения)») — цифру поколения оставляем, слова-обвязку режем
+    "наушники", "беспроводные", "проводные", "поколения", "поколение", "го",
+    # кириллические варианты SIM (запрос «17 256 две симки» / «сим+есим»)
+    "сим", "есим", "симка", "симки", "симкарта", "две",
+    # ремешки часов: вариант ремешка не различаем (цены те же, а лексика
+    # у магазинов вразнобой — фрагментирует семью до «не нашёл»)
+    "band", "loop", "case", "with", "milanese", "alpine", "ocean", "trail",
+    "sport", "braided", "solo", "link", "ремешок", "ремешком",
+    # маркеры поколения: цифру оставляем (обработка в model_key), слово режем
+    "gen", "generation",
 }
 # Цвета (RU+EN). НЕ включаем pro/max/plus/air/ultra/mini — это модель, не цвет!
 _COLORS = {
@@ -67,11 +80,17 @@ _COLORS = {
     "gold", "silver", "gray", "grey", "graphite", "titanium", "midnight",
     "starlight", "space", "orange", "teal", "lavender", "cream", "mint",
     "sierra", "pacific", "desert", "natural", "ultramarine", "coral",
+    "rose", "jet", "slate", "navy",       # Rose Gold / Jet Black / Slate / Navy
     "чёрный", "черный", "белый", "синий", "красный", "зелёный", "зеленый",
     "жёлтый", "желтый", "фиолетовый", "розовый", "золотой", "золото",
     "серебристый", "серебро", "серый", "графит", "графитовый", "титан",
     "титановый", "полночный", "космический", "оранжевый", "бирюзовый",
     "лавандовый", "бежевый", "голубой",
+    "черные", "белые",                    # мн.ч. у аксессуаров («наушники белые»)
+    # женский род (колонки, станции: «Яндекс Станция оранжевая»)
+    "черная", "белая", "синяя", "красная", "зеленая", "серая", "розовая",
+    "фиолетовая", "желтая", "голубая", "бежевая", "серебристая", "золотая",
+    "бирюзовая", "лавандовая", "оранжевая",
 }
 
 # Объём памяти: "256gb", "256 гб", "1tb", "8/256gb" (RAM/ROM — берём ROM=второе).
@@ -100,24 +119,43 @@ def storage_of(title: str) -> str | None:
     return None
 
 
-# Тип SIM. eSIM-only (глобал/импорт) и физическая+eSIM («Sim+E-Sim», ЕАС) —
-# РАЗНЫЕ SKU/рынки с разной ценой, поэтому различаем при матчинге (мягкий guard
-# в match.py). Из model_key sim по-прежнему выкинут — это отдельный признак.
-_ESIM_RE = re.compile(r"e[\s\-_]?sim", re.I)
-_PHYS_SIM_RE = re.compile(r"\bsim\b|nano[\s\-]?sim|\bdual\b|двойн|две\s*sim|2\s*sim|физическ", re.I)
+# Тип SIM — ЖЁСТКОЕ разделение SKU на три несовместимые группы (разные рынки/цены):
+# eSIM-only (глобал/импорт), физическая+eSIM («Sim+E-Sim», ЕАС) и две физические
+# SIM (Китай/ГК «2 nano-SIM»). Сравнивать цены МОЖНО только внутри одной группы
+# (guard в match.py/store.py). Из model_key sim по-прежнему выкинут — отдельный признак.
+# \b обязателен: без него «Blue Sim+eSIM» терял «e Sim» из хвоста цвета и
+# давал ложный esim-only для физической симки.
+_ESIM_RE = re.compile(r"\be[\s\-_]?sim|\bесим\b|\bе[\s\-_]?сим\b", re.I)
+# Физическая nano-SIM. Голое "dual"/"двойн" НЕ считаем физикой: «Dual eSIM» (US,
+# 2×eSIM) — это eSIM-группа. Требуем именно sim/nano/сим-токен (eSIM уже вычтен).
+_PHYS_SIM_RE = re.compile(
+    r"\bsim\b|nano[\s\-]?sim|две\s*sim|2\s*sim|физическ|\bсим\w*|две\s*сим", re.I)
+# Две ФИЗИЧЕСКИЕ SIM без eSIM (китайская/гонконгская версия): «2 nano-SIM»,
+# «Dual SIM», «две симки» — отдельный SKU, не путать с «Sim+eSIM».
+_DUAL_SIM_RE = re.compile(
+    r"\bdual\s*sim\b|dual\s*nano|две\s*sim|две\s*сим|\b2\s*(?:nano[\s\-]?)?sim\b|"
+    r"\b2\s*сим\b|двойн\w*\s*sim", re.I)
 
 
 def sim_type_of(title: str) -> str | None:
-    """Тип SIM из названия: "esim" / "physical" / None (не указан).
+    """Тип SIM из названия: "esim" / "sim_esim" / "dual_sim" / None (не указан).
 
-    "physical" = есть физическая симка (вкл. "Sim+E-Sim"); "esim" = только eSIM.
-    Сначала вычитаем вхождения e-sim, чтобы остаток выдал именно физическую SIM
-    (иначе "Sim+E-Sim" дал бы ложный esim-only по слову "esim").
+      • "esim"     — только eSIM (вкл. «Dual eSIM»), без физической симки;
+      • "sim_esim" — физическая nano-SIM + eSIM («Sim+E-Sim», «Nano-SIM + eSIM»);
+      • "dual_sim" — две физические SIM без eSIM («2 nano-SIM», Китай/ГК).
+
+    eSIM-вхождения вычитаем ПЕРЕД поиском физической/двойной симки, иначе
+    «Sim+E-Sim» дал бы ложный esim-only, а «Dual eSIM» — ложный dual_sim.
     """
     s = unicodedata.normalize("NFKC", title or "").lower().replace("ё", "е")
     has_esim = bool(_ESIM_RE.search(s))
-    if _PHYS_SIM_RE.search(_ESIM_RE.sub(" ", s)):
-        return "physical"
+    phys_s = _ESIM_RE.sub(" ", s)                     # убрать eSIM, остаток = физика
+    has_dual = bool(_DUAL_SIM_RE.search(phys_s))
+    has_phys = has_dual or bool(_PHYS_SIM_RE.search(phys_s))
+    if has_dual and not has_esim:
+        return "dual_sim"                             # 2 физ. SIM без eSIM (Китай)
+    if has_phys:
+        return "sim_esim"                             # физ. SIM (+ обычно eSIM)
     return "esim" if has_esim else None
 
 
@@ -133,7 +171,16 @@ _ALIAS = {
     # модель-слова (для RU-запросов «про макс», «ультра»)
     "про": "pro", "макс": "max", "плюс": "plus", "мини": "mini",
     "ультра": "ultra", "эйр": "air", "эир": "air", "лайт": "lite",
+    "series": "s", "серия": "s",          # Watch Series 10 == Watch S10
+    "2nd": "2", "3rd": "3", "4th": "4", "5th": "5", "1st": "1",  # 2nd gen == 2
 }
+
+# Серия+номер, написанные раздельно («SE 2», «Series 10» -> se2/s10) — сливаем,
+# иначе «Watch SE 2» и «Watch SE2» дают разные ключи.
+_SERIES = {"se", "s", "a", "m", "mi"}
+# ...но не в названиях фототехники: у объективов «AF-S 24-120mm» цифра — фокусное,
+# слияние в «s24» дало бы ложное попадание в телефоны.
+_NO_SERIES_MERGE = {"lens", "kit", "фотоаппарат", "объектив", "macro"}
 
 
 def model_key(title: str) -> str:
@@ -148,6 +195,9 @@ def model_key(title: str) -> str:
     st = storage_of(title)
     # slash-сохраняющая строка, чтобы поймать конструкцию RAM/ROM ("8/256")
     s = unicodedata.normalize("NFKC", title).lower().replace("ё", "е")
+    # размер часов: «42 mm»/«42 мм» -> «42mm» (иначе id-guard матчинга рвёт
+    # ВСЮ категорию Watch между магазинами)
+    s = re.sub(r"\b(\d{2})\s*(?:mm|мм)\b", r"\1mm", s)
     anchor: int | None = None
     for rx in (_RAM_ROM_RE, _TB_RE, _GB_RE):
         m = rx.search(s)
@@ -155,20 +205,47 @@ def model_key(title: str) -> str:
             anchor = m.start() if anchor is None else min(anchor, m.start())
     if anchor is not None:
         s = s[:anchor]                     # всё после объёма (цвет/sim) — долой
+    # «Pro+» != «Pro» (разные модели!): плюс перед пробелом/концом -> слово plus.
+    # «Sim+E-Sim» не трогаем (за «+» идёт буква).
+    s = re.sub(r"\+(?=\s|$)", " plus ", s)
     s = re.sub(r"[^\w]+", " ", s, flags=re.UNICODE)   # пунктуация -> пробел
 
+    raw = [_ALIAS.get(w, w) for w in s.split()]       # айфон -> iphone
+    # мусор — до слияния серий: «SE (Gen.2)» должен стать [se, 2] -> se2
+    raw = [w for w in raw
+           if w not in _STOP and w not in _COLORS
+           and not (w.isdigit() and len(w) >= 5)              # артикулы/штрихкоды
+           and not (w.isdigit() and len(w) == 4 and w[:2] in ("19", "20"))]  # год «2025»
+    merged: list[str] = []
+    can_merge = not (_NO_SERIES_MERGE & set(raw))
+    i = 0
+    while i < len(raw):                   # se|s|a|m|mi + 1-2 цифры -> se2/s10/a54
+        if (can_merge and raw[i] in _SERIES and i + 1 < len(raw)
+                and raw[i + 1].isdigit() and len(raw[i + 1]) <= 2):
+            merged.append(raw[i] + raw[i + 1])
+            i += 2
+        else:
+            merged.append(raw[i])
+            i += 1
+
     tokens: list[str] = []
-    for w in s.split():
-        w = _ALIAS.get(w, w)              # айфон -> iphone
-        if len(w) <= 1:                   # одиночные буквы ("e" из "E-Sim") — шум
-            continue
-        if w in _STOP or w in _COLORS:    # ловит цвет, если он попал ДО объёма
-            continue
-        if w.isdigit() and len(w) >= 5:   # артикулы/штрихкоды — мусор
-            continue
+    for w in merged:
+        if len(w) <= 1 and not w.isdigit():   # одиночные буквы ("e" из "E-Sim") — шум,
+            continue                          # но цифра = номер модели (AirPods 4, Ultra 2)
         tokens.append(w)
 
     tokens = sorted(set(tokens))
+    low_full = unicodedata.normalize("NFKC", title).lower()
+    if re.search(r"\blte\b|cellular|\bсотов", low_full):
+        # LTE/Cellular-версия планшета — другой товар (разница 10-15 тыс.);
+        # токен в _VARIANT матчинга, чтобы Wi-Fi не матчился к LTE
+        tokens.append("cellular")
+    m = _RAM_ROM_RE.search(low_full)
+    if m:
+        # RAM различает SKU (8/256 и 12/256 — разные товары с разной ценой),
+        # иначе collapse_variants схлопнет их в цену дешёвого. В match.py этот
+        # токен ИСКЛЮЧЁН из жёсткого guard'а (конкурент может RAM не писать).
+        tokens.append(f"ram{int(m.group(1))}")
     if st:
         tokens.append(st)                  # объём всегда в хвосте ключа
     return " ".join(tokens)
@@ -249,7 +326,9 @@ def color_of(title: str) -> str | None:
     У ритейла бренд+модель идут ДО объёма, цвет — ПОСЛЕ ("256Gb Deep Blue").
     Берём всё после объёма, выкидываем SIM-скобки и шум -> канон цвета для
     группировки нашего каталога (di-park) по цвету. Без объёма (наушники, часы,
-    стилус) цвет не выделяем -> None (такие товары не дробим по цвету).
+    стилус) якоря нет — берём известные цвет-слова (_COLORS) из названия:
+    «Watch S10 46mm Rose Gold» -> "rose gold" (иначе Watch не дробятся по цвету,
+    а цвет-слова утекали бы в model_key и рвали семью).
 
     Цвета между магазинами называются по-разному (Midnight/Black/Чёрный), поэтому
     этот ключ применяем ТОЛЬКО к нашему каталогу для показа per-color цены, а не
@@ -263,7 +342,9 @@ def color_of(title: str) -> str | None:
         if m:
             end = m.end() if end is None else max(end, m.end())
     if end is None:
-        return None
+        tail = re.sub(r"[^\w]+", " ", low, flags=re.UNICODE).replace("ё", "е")
+        words = [w for w in tail.split() if w in _COLORS]
+        return " ".join(words) or None
     tail = re.sub(r"\([^)]*\)", " ", s[end:])             # выкинуть (Sim+E-Sim)
     tail = re.sub(r"[^\w]+", " ", tail, flags=re.UNICODE).lower().replace("ё", "е")
     words = [w for w in tail.split()
@@ -272,7 +353,10 @@ def color_of(title: str) -> str | None:
 
 
 # Б/У, уценка, восстановленные, % заряда батареи — НЕ сравниваем с новыми.
-_USED_RE = re.compile(r"б\s*/?\s*у\b|\bбу\b|уцен|восстановл|refurb|trade.?in|\d{1,3}\s*%", re.I)
+# RFB = refurbished, «Актив»/«активированный», «копия», витринные экземпляры.
+_USED_RE = re.compile(
+    r"б\s*/?\s*у\b|\bбу\b|уцен|восстановл|refurb|trade.?in|\d{1,3}\s*%|"
+    r"\brfb\b|актив|копия|витрин", re.I)
 
 
 def is_used(title: str) -> bool:

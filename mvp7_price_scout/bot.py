@@ -48,10 +48,32 @@ def send_message(token: str, chat_id: int, text: str, buttons: list | None = Non
         }
     try:
         r = requests.post(f"{API}/bot{token}/sendMessage", json=payload, timeout=30)
+        if r.status_code == 400 and "parse" in r.text.lower():
+            # битый HTML (обрезка text[:4000] могла порвать тег) — доставить хоть текстом
+            payload.pop("parse_mode", None)
+            r = requests.post(f"{API}/bot{token}/sendMessage", json=payload, timeout=30)
         if not r.ok:   # 400 (битый HTML), 403 (бот заблокан) — иначе ответ молча терялся
             print(f"[bot] sendMessage -> {chat_id} не дошло: {r.status_code} {r.text[:200]}")
     except Exception as e:
         print(f"[bot] sendMessage -> {chat_id} ошибка сети: {e}")
+
+
+def edit_message(token: str, chat_id: int, message_id: int, text: str,
+                 buttons: list | None = None) -> None:
+    """Отредактировать текст сообщения (живой статус-бар — не плодим новые)."""
+    payload = {"chat_id": chat_id, "message_id": message_id, "text": text[:4000],
+               "parse_mode": "HTML", "disable_web_page_preview": True}
+    if buttons:
+        payload["reply_markup"] = {
+            "inline_keyboard": [[{"text": b[0], "callback_data": b[1]}] for b in buttons]
+        }
+    try:
+        r = requests.post(f"{API}/bot{token}/editMessageText", json=payload, timeout=30)
+        # «message is not modified» (прогресс не изменился между тапами) — это не ошибка
+        if not r.ok and "not modified" not in r.text.lower():
+            print(f"[bot] editMessageText -> {chat_id} не дошло: {r.status_code} {r.text[:200]}")
+    except Exception as e:
+        print(f"[bot] editMessageText -> {chat_id} ошибка сети: {e}")
 
 
 def answer_callback(token: str, cb_id: str) -> None:
@@ -106,35 +128,55 @@ def main() -> None:
         for upd in updates:
             offset = upd["update_id"] + 1
 
-            cb = upd.get("callback_query")               # тап по inline-кнопке (подсказка/цвет)
+            cb = upd.get("callback_query")               # тап по inline-кнопке (подсказка/цвет/статус)
             if cb:
                 answer_callback(token, cb["id"])
+                data = cb.get("data", "")
                 try:
-                    reply = handlers.handle_callback(conn, cb.get("data", ""))
+                    reply = handlers.handle_callback(conn, data)
                 except Exception as e:
                     print("Ошибка callback:", e)
                     reply = None
                 if reply and cb.get("message"):
-                    send_message(token, cb["message"]["chat"]["id"], reply.text, reply.buttons)
+                    m = cb["message"]
+                    if data == "status":     # статус-бар: обновляем ТО ЖЕ сообщение, не плодим новые
+                        edit_message(token, m["chat"]["id"], m["message_id"], reply.text, reply.buttons)
+                    else:
+                        send_message(token, m["chat"]["id"], reply.text, reply.buttons)
                 continue
 
             msg = upd.get("message") or upd.get("edited_message")
-            if not msg or "text" not in msg:
+            if not msg:
                 continue
             chat_id = msg["chat"]["id"]
-            text = msg["text"]
+            text = msg.get("text") or msg.get("caption")   # подпись к фото — тоже запрос
+            if not text:                                   # стикер/voice — не молчим
+                send_message(token, chat_id,
+                             "Пришли название товара текстом, например: "
+                             "<code>iphone 17 pro 256</code>")
+                continue
+            is_admin = str(chat_id) in admins
             if text.strip().lower() == "/id":            # помощь в настройке админов
                 send_message(token, chat_id, f"Твой chat_id: <code>{chat_id}</code>")
                 continue
             if text.strip().lower().startswith("/export"):
+                if not is_admin:   # полная ценовая аналитика — не для чужих глаз
+                    send_message(token, chat_id, "Команда /export доступна только администратору.")
+                    continue
+                path = None
                 try:
                     path = handlers.build_export_xlsx(conn)
                     send_document(token, chat_id, path, "Сравнение цен Di-Park vs конкуренты")
                 except Exception as e:
                     print("Ошибка /export:", e)
                     send_message(token, chat_id, "Не удалось сформировать выгрузку.")
+                finally:
+                    if path:
+                        try:
+                            os.unlink(path)              # не копить xlsx в /tmp
+                        except OSError:
+                            pass
                 continue
-            is_admin = str(chat_id) in admins
             try:
                 reply = handlers.handle_text(conn, text, is_admin)
             except Exception as e:

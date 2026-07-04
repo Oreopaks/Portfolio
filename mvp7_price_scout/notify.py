@@ -30,7 +30,16 @@ def _chunks(text: str, limit: int = 4000) -> list[str]:
         cur = f"{cur}\n{line}" if cur else line
     if cur:
         out.append(cur)
-    return [c[:limit] for c in out]      # страховка на сверхдлинную одиночную строку
+
+    def _hard_cut(c: str) -> str:
+        """Страховка на сверхдлинную одиночную строку — не оставлять открытый тег."""
+        if len(c) <= limit:
+            return c
+        cut = c[:limit]
+        lt, gt = cut.rfind("<"), cut.rfind(">")
+        return cut[:lt] if lt > gt else cut
+
+    return [_hard_cut(c) for c in out]
 
 
 def send_admins(text: str) -> None:

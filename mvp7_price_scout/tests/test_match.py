@@ -110,6 +110,38 @@ def test_sim_guard_picks_matching_base_variant():
     assert match_one(p, idx)[0] == 13
 
 
+def test_kind_guard_device_not_matched_to_accessory():
+    """Наушники конкурента НЕ матчатся к нашему ЧЕХЛУ для них (fuzzy score ~55 проходил)."""
+    rows = [{"id": 9, "title": "Чехол для AirPods Pro 3 Uniq Clyde розовый",
+             "model_key": model_key("Чехол для AirPods Pro 3 Uniq Clyde розовый"),
+             "storage": None, "price": 2490}]
+    idx = build_index(rows)
+    p = Product(shop="x", title="AirPods Pro (3-го поколения)", price=18490)
+    pid, _ = match_one(p, idx)
+    assert pid is None
+
+
+def test_kind_guard_watch_not_matched_to_buds():
+    rows = [{"id": 9, "title": "Наушники CMF Buds Pro 2",
+             "model_key": model_key("Наушники CMF Buds Pro 2"),
+             "storage": None, "price": 4990}]
+    idx = build_index(rows)
+    p = Product(shop="x", title="Nothing CMF Watch Pro 2 Grey", price=7990)
+    pid, _ = match_one(p, idx)
+    assert pid is None
+
+
+def test_watch_series_cross_shop_match():
+    """«Watch Series 11, 42 mm» конкурента матчится к нашей «Watch S11 42mm»."""
+    rows = [{"id": 7, "title": "Apple Watch S11 42mm Rose Gold",
+             "model_key": model_key("Apple Watch S11 42mm Rose Gold"),
+             "storage": None, "price": 29990}]
+    idx = build_index(rows)
+    p = Product(shop="x", title="Apple Watch Series 11, 42 mm Aluminium", price=30490)
+    pid, _ = match_one(p, idx)
+    assert pid == 7
+
+
 def test_match_all_sets_dipark_id():
     rows = _base()
     prods = [

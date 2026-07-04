@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 from pathlib import Path
@@ -56,12 +57,30 @@ CREATE TABLE IF NOT EXISTS run_counts (
     with_price INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_runcounts_ts ON run_counts(run_ts);
+
+-- Прогресс ТЕКУЩЕГО сбора (одна строка) — collector пишет по шагам, бот читает
+-- (WAL: чтение боту не блокируется) и рисует статус-бар в /status. steps = JSON
+-- [{shop, status: pending|running|done|fail, n}].
+CREATE TABLE IF NOT EXISTS run_progress (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    started_at  TEXT,
+    finished_at TEXT,
+    heavy       INTEGER NOT NULL DEFAULT 0,
+    steps       TEXT NOT NULL DEFAULT '[]'
+);
 """
 
 
 def connect(db_path: str | os.PathLike | None = None) -> sqlite3.Connection:
-    """Открыть БД (env PRICESCOUT_DB > аргумент > дефолт) и накатить схему."""
-    path = db_path or os.environ.get("PRICESCOUT_DB") or DEFAULT_DB
+    """Открыть БД (env PRICESCOUT_DB > аргумент > дефолт) и накатить схему.
+
+    Относительный путь (PRICESCOUT_DB=mvp7_price_scout/prices.db) резолвим от
+    корня репо, не от cwd — иначе запуск не из корня молча создаёт вторую
+    пустую базу, и бот отвечает «каталог пуст».
+    """
+    path = Path(db_path or os.environ.get("PRICESCOUT_DB") or DEFAULT_DB)
+    if not path.is_absolute():
+        path = Path(__file__).resolve().parents[1] / path
     conn = sqlite3.connect(str(path), timeout=15)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")   # чтение боту не блокируется записью collector
@@ -93,6 +112,44 @@ def link_base_self(conn: sqlite3.Connection) -> None:
         conn.execute("UPDATE products SET dipark_id = id WHERE source_type = 'base'")
 
 
+def upsert_base(conn: sqlite3.Connection, products: list[Product]) -> int:
+    """Обновить каталог эталона БЕЗ ротации id: UPDATE по (url, title), INSERT
+    новых, DELETE исчезнувших. Вернуть число строк каталога.
+
+    replace_shop (DELETE+INSERT) для эталона не годится: id ротируются каждый
+    прогон, а на них ссылаются price_log (без стабильных id алерты «конкурент
+    снизил цену» никогда не срабатывают — прошлый прогон весь по мёртвым id),
+    dipark_id конкурентов (окно отвязки между пересборками магазинов) и
+    callback-кнопки «p:{id}» в уже отправленных сообщениях.
+    """
+    with conn:
+        old: dict[tuple, list[int]] = {}
+        for r in conn.execute(
+                "SELECT id, url, title FROM products WHERE source_type = 'base'"):
+            old.setdefault((r["url"], r["title"]), []).append(r["id"])
+        seen: set[int] = set()
+        for p in products:
+            pid = next((i for i in old.get((p.url, p.title), []) if i not in seen), None)
+            if pid is not None:
+                seen.add(pid)
+                conn.execute(
+                    "UPDATE products SET model_key=?, storage=?, price=?, in_stock=?, "
+                    "fetched_at=? WHERE id=?",
+                    (p.model_key, p.storage, p.price, int(p.in_stock), p.fetched_at, pid))
+            else:
+                conn.execute(
+                    "INSERT INTO products (shop, title, model_key, storage, price, "
+                    "in_stock, url, source_type, fetched_at, dipark_id) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,NULL)",
+                    (p.shop, p.title, p.model_key, p.storage, p.price,
+                     int(p.in_stock), p.url, p.source_type, p.fetched_at))
+        gone = [i for ids in old.values() for i in ids if i not in seen]
+        if gone:
+            conn.executemany("DELETE FROM products WHERE id = ?", [(i,) for i in gone])
+        conn.execute("UPDATE products SET dipark_id = id WHERE source_type = 'base'")
+    return len(products)
+
+
 def base_catalog(conn: sqlite3.Connection) -> list[dict]:
     """Каталог эталона (наш di-park) — id+ключ+объём+цена для матчинга/поиска."""
     cur = conn.execute(
@@ -111,18 +168,26 @@ def search_base(conn: sqlite3.Connection, query_key: str, limit: int = 40) -> li
     words = [w for w in query_key.split() if len(w) >= 2]
     if not words:
         cur = conn.execute(
-            "SELECT id, title, model_key, storage, price, url "
-            "FROM products WHERE source_type='base' LIMIT ?", (limit * 4,)
+            "SELECT id, title, model_key, storage, price, url, fetched_at "
+            "FROM products WHERE source_type='base' "
+            "ORDER BY (price IS NULL), price LIMIT ?", (limit * 4,)
         )
         return [dict(r) for r in cur.fetchall()]
+    # Сортировка: сначала по числу совпавших слов (иначе LIMIT забивается
+    # тысячами дешёвых аксессуаров с одним общим словом «pro», и сам телефон
+    # не попадает в кандидаты), затем приценённые строки (представитель семьи
+    # в подсказках должен иметь цену).
+    hit_expr = " + ".join(["(model_key LIKE ? OR title LIKE ?)"] * len(words))
     clause = " OR ".join(["model_key LIKE ? OR title LIKE ?"] * len(words))
     params: list[str] = []
     for w in words:
         params += [f"%{w}%", f"%{w}%"]
     cur = conn.execute(
-        f"SELECT id, title, model_key, storage, price, url "
-        f"FROM products WHERE source_type='base' AND ({clause}) LIMIT ?",
-        (*params, limit * 4),
+        f"SELECT id, title, model_key, storage, price, url, fetched_at, "
+        f"({hit_expr}) AS hits "
+        f"FROM products WHERE source_type='base' AND ({clause}) "
+        f"ORDER BY hits DESC, (price IS NULL), price LIMIT ?",
+        (*params, *params, limit * 4),
     )
     return [dict(r) for r in cur.fetchall()]
 
@@ -147,18 +212,37 @@ def competitors_for(conn: sqlite3.Connection, base_row: dict) -> list[dict]:
     cur = conn.execute(
         f"SELECT shop, title, price, url, in_stock, source_type, fetched_at "
         f"FROM products WHERE source_type != 'base' AND dipark_id IN ({placeholders}) "
+        f"AND in_stock = 1 "        # «нет в наличии» — не конкурент: купить нельзя
         f"ORDER BY (price IS NULL), price",
         ids,
     )
-    # мягкий SIM-guard по SIM самого КОНКУРЕНТА (а не по строке, к которой он
-    # случайно привязался матчером): конкурент без пометки SIM виден на любой
-    # карточке, явный eSIM — только на eSIM, явный Sim+E-Sim — только на physical.
+    # Строгий SIM-guard по SIM самого КОНКУРЕНТА (а не по строке, к которой он
+    # случайно привязался матчером). Каждой строке ставим флаг sim_ok — учитывать
+    # ли её в расчёте «дешевле всех» (см. handlers/market_position/biggest_gaps):
+    #   • base без типа SIM (Samsung/аксессуары) — все конкуренты валидны;
+    #   • явный ДРУГОЙ тип SIM — не конкурент, отбраковываем (eSIM не лезет на
+    #     Sim+eSIM-карточку и наоборот, «2 nano-SIM» не путаем с «Sim+eSIM»);
+    #   • магазин, ЯВНО метящий нужный тип, свои НЕпомеченные строки метит другим
+    #     (repremium метит eSIM, physical — без пометки) — их выкидываем;
+    #   • немаркированный конкурент дешевле «зазора» между нашими eSIM и physical
+    #     ценами почти наверняка продаёт eSIM-версию: показываем, но sim_ok=False
+    #     (не занижаем рекомендацию по Sim+eSIM ценой eSIM-SKU — корень бага).
     bsim = sim_type_of(base_row["title"])
+    rows = [(dict(r), sim_type_of(r["title"])) for r in cur.fetchall()]
+    if bsim is None:
+        for r, _ in rows:
+            r["sim_ok"] = True
+        return [r for r, _ in rows]
+    compat = [(r, csim) for r, csim in rows if csim is None or csim == bsim]
+    marked_shops = {r["shop"] for r, csim in compat if csim == bsim}
+    kept = [(r, csim) for r, csim in compat if csim == bsim or r["shop"] not in marked_shops]
+    leak = (family_sim_leak_threshold(conn, base_row)
+            if bsim in ("sim_esim", "dual_sim") else None)
     out: list[dict] = []
-    for r in cur.fetchall():
-        csim = sim_type_of(r["title"])
-        if bsim is None or csim is None or bsim == csim:
-            out.append(dict(r))
+    for r, csim in kept:
+        r["sim_ok"] = not (csim is None and leak is not None
+                           and r["price"] is not None and r["price"] < leak)
+        out.append(r)
     return out
 
 
@@ -178,6 +262,50 @@ def family_colors(conn: sqlite3.Connection, base_row: dict) -> list[dict]:
     return [dict(r) for r in cur.fetchall() if sim_type_of(r["title"]) == bsim]
 
 
+def family_sim_leak_threshold(conn: sqlite3.Connection, base_row: dict) -> int | None:
+    """Ценовой порог «немаркированный конкурент — это eSIM-версия» для physical-карточки.
+
+    Немаркированный конкурент дешевле порога почти наверняка продаёт eSIM-SKU и
+    не должен занижать рекомендацию по Sim+eSIM/Dual-SIM (корень бага «поставь
+    94 890 ₽»). Порог = СЕРЕДИНА зазора между нашей самой дорогой eSIM-ценой и
+    самой дешёвой physical-ценой той же семьи (так отсекаются и eSIM-цены выше
+    минимума, и физику-undercutter не задеваем). Зазора нет — потолок eSIM.
+    None, если eSIM-варианта в каталоге нет (сравнивать не с чем).
+    """
+    cur = conn.execute(
+        "SELECT title, price FROM products "
+        "WHERE source_type = 'base' AND model_key = ? AND storage IS ? "
+        "AND price IS NOT NULL",
+        (base_row["model_key"], base_row["storage"]),
+    )
+    esim: list[int] = []
+    phys: list[int] = []
+    for r in cur.fetchall():
+        st = sim_type_of(r["title"])
+        if st == "esim":
+            esim.append(r["price"])
+        elif st in ("sim_esim", "dual_sim"):
+            phys.append(r["price"])
+    if not esim:
+        return None
+    hi = max(esim)
+    if phys and min(phys) > hi:            # чистый зазор eSIM|physical — режем посередине
+        return (hi + min(phys)) // 2
+    return hi
+
+
+def _base_families(conn: sqlite3.Connection) -> list[list[dict]]:
+    """Строки эталона, сгруппированные в семьи (model_key, storage, sim) — как
+    их видит карточка бота. Для /stats и /top, чтобы числа сходились с карточками."""
+    fams: dict[tuple, list[dict]] = {}
+    for r in conn.execute(
+            "SELECT id, title, model_key, storage, price, url, fetched_at "
+            "FROM products WHERE source_type = 'base'"):
+        d = dict(r)
+        fams.setdefault((d["model_key"], d["storage"], sim_type_of(d["title"])), []).append(d)
+    return list(fams.values())
+
+
 def base_by_id(conn: sqlite3.Connection, dipark_id: int) -> dict | None:
     cur = conn.execute(
         "SELECT id, title, model_key, storage, price, url, fetched_at "
@@ -189,36 +317,32 @@ def base_by_id(conn: sqlite3.Connection, dipark_id: int) -> dict | None:
 
 
 def biggest_gaps(conn: sqlite3.Connection, limit: int = 15) -> list[dict]:
-    """Товары, где мы дороже самого дешёвого конкурента — сильнее всего (для /top).
+    """Семьи, где мы дороже самого дешёвого конкурента — сильнее всего (для /top).
+
+    Считаем ПО СЕМЬЯМ и через ту же выборку конкурентов, что карточка
+    (competitors_for: семья+SIM-guard) — иначе /top говорил «дороже всех» там,
+    где карточка того же товара говорила обратное, и дублировал проигрыш по
+    цветам одного товара.
 
     Возвращает [{dipark_id, title, our_price, min_comp, min_shop, gap}], gap>0.
     """
-    cur = conn.execute(
-        """
-        SELECT b.id AS dipark_id, b.title AS title, b.price AS our_price,
-               MIN(c.price) AS min_comp
-        FROM products b
-        JOIN products c ON c.dipark_id = b.id AND c.source_type != 'base'
-        WHERE b.source_type = 'base' AND b.price IS NOT NULL AND c.price IS NOT NULL
-        GROUP BY b.id
-        HAVING b.price > MIN(c.price)
-        ORDER BY (b.price - MIN(c.price)) DESC
-        LIMIT ?
-        """,
-        (limit,),
-    )
     out: list[dict] = []
-    for r in cur.fetchall():
-        d = dict(r)
-        d["gap"] = d["our_price"] - d["min_comp"]
-        # какой магазин дал минимум
-        sub = conn.execute(
-            "SELECT shop FROM products WHERE dipark_id=? AND source_type!='base' "
-            "AND price=? LIMIT 1", (d["dipark_id"], d["min_comp"]),
-        ).fetchone()
-        d["min_shop"] = sub["shop"] if sub else "?"
-        out.append(d)
-    return out
+    for rows in _base_families(conn):
+        priced = [r for r in rows if r["price"] is not None]
+        if not priced:
+            continue
+        rep = min(priced, key=lambda r: r["price"])
+        comps = [c for c in competitors_for(conn, rep)
+                 if c["price"] is not None and c.get("sim_ok", True)]
+        if not comps:
+            continue
+        best = min(comps, key=lambda c: c["price"])
+        if rep["price"] > best["price"]:
+            out.append({"dipark_id": rep["id"], "title": rep["title"],
+                        "our_price": rep["price"], "min_comp": best["price"],
+                        "min_shop": best["shop"], "gap": rep["price"] - best["price"]})
+    out.sort(key=lambda d: d["gap"], reverse=True)
+    return out[:limit]
 
 
 def append_price_log(conn: sqlite3.Connection, products: list[Product], run_ts: str) -> None:
@@ -268,28 +392,75 @@ def previous_source_counts(conn: sqlite3.Connection, before_ts: str) -> dict[str
     return {r["shop"]: (r["n"], r["with_price"]) for r in cur.fetchall()}
 
 
+def progress_start(conn: sqlite3.Connection, shops: list[str], ts: str,
+                   heavy: bool = False) -> None:
+    """Начать трек прогресса: одна строка, все шаги в статусе pending."""
+    steps = json.dumps([{"shop": s, "status": "pending", "n": None} for s in shops])
+    with conn:
+        conn.execute("DELETE FROM run_progress")
+        conn.execute(
+            "INSERT INTO run_progress (id, started_at, finished_at, heavy, steps) "
+            "VALUES (1, ?, NULL, ?, ?)", (ts, int(heavy), steps))
+
+
+def progress_mark(conn: sqlite3.Connection, shop: str, status: str,
+                  n: int | None = None) -> None:
+    """Отметить шаг источника: status = running | done | fail (+ число товаров)."""
+    row = conn.execute("SELECT steps FROM run_progress WHERE id = 1").fetchone()
+    if not row:
+        return
+    steps = json.loads(row["steps"])
+    for st in steps:
+        if st["shop"] == shop:
+            st["status"] = status
+            if n is not None:
+                st["n"] = n
+            break
+    with conn:
+        conn.execute("UPDATE run_progress SET steps = ? WHERE id = 1", (json.dumps(steps),))
+
+
+def progress_finish(conn: sqlite3.Connection, ts: str) -> None:
+    """Пометить сбор завершённым (проставить finished_at)."""
+    with conn:
+        conn.execute("UPDATE run_progress SET finished_at = ? WHERE id = 1", (ts,))
+
+
+def progress_read(conn: sqlite3.Connection) -> dict | None:
+    """Текущий прогресс сбора или None, если сбор ещё ни разу не запускался."""
+    row = conn.execute(
+        "SELECT started_at, finished_at, heavy, steps FROM run_progress WHERE id = 1"
+    ).fetchone()
+    if not row or not row["started_at"]:
+        return None
+    return {"started_at": row["started_at"], "finished_at": row["finished_at"],
+            "heavy": bool(row["heavy"]), "steps": json.loads(row["steps"])}
+
+
 def market_position(conn: sqlite3.Connection) -> dict:
     """Позиция на рынке: где мы дешевле/дороже/наравне + средний проигрыш.
 
-    Считаем по товарам, где есть И наша цена, И цена хоть одного конкурента.
+    Считаем ПО СЕМЬЯМ через competitors_for — та же логика, что у карточки
+    (семья+SIM-guard), иначе /stats расходился с карточками. Семья учитывается,
+    если есть И наша цена, И цена хоть одного конкурента.
     """
-    cur = conn.execute(
-        """
-        SELECT b.id, b.price AS our, MIN(c.price) AS mn
-        FROM products b
-        JOIN products c ON c.dipark_id = b.id AND c.source_type != 'base'
-        WHERE b.source_type = 'base' AND b.price IS NOT NULL AND c.price IS NOT NULL
-        GROUP BY b.id
-        """
-    )
     cheaper = pricier = equal = 0
     loss_pcts: list[float] = []
-    for r in cur.fetchall():
-        if r["our"] < r["mn"]:
+    for rows in _base_families(conn):
+        priced = [r for r in rows if r["price"] is not None]
+        if not priced:
+            continue
+        rep = min(priced, key=lambda r: r["price"])
+        comps = [c["price"] for c in competitors_for(conn, rep)
+                 if c["price"] is not None and c.get("sim_ok", True)]
+        if not comps:
+            continue
+        mn = min(comps)
+        if rep["price"] < mn:
             cheaper += 1
-        elif r["our"] > r["mn"]:
+        elif rep["price"] > mn:
             pricier += 1
-            loss_pcts.append((r["our"] - r["mn"]) / r["our"] * 100)
+            loss_pcts.append((rep["price"] - mn) / rep["price"] * 100)
         else:
             equal += 1
     total = cheaper + pricier + equal

@@ -18,8 +18,15 @@ from mvp7_price_scout.normalize import Product, clean_title, parse_price
 SHOP = "smart_room_57"
 TARGET = "smart_room_57"
 
-# Число с разделителями тысяч (47 990 / 47.990) или сплошной прогон 4-6 цифр.
-_PRICE = re.compile(r"(\d{1,3}(?:[.\s ]\d{3})+|\d{4,6})\s*(?:₽|руб|р\b|rub)?", re.I)
+# Число с разделителями тысяч (47 990 / 47.990) или сплошной прогон 4-7 цифр.
+# Guard'ы: не начинать посреди числа/после слэша («8/256» — RAM/ROM, не цена)
+# и не считать ценой объём/размер («256GB», «45mm») — иначе «iPhone 15 256GB
+# в наличии» рождал ложную цену 15 256.
+_PRICE = re.compile(
+    r"(?<![\d/])(\d{1,3}(?:[.\s ]\d{3})+|\d{4,7})(?!\s*(?:gb|гб|tb|тб|mm|мм|mp|мп))"
+    r"\s*(?:₽|руб|р\b|rub)?",
+    re.I,
+)
 _BRAND = re.compile(r"iphone|samsung|galaxy|xiaomi|redmi|poco|honor|realme|airpods|"
                     r"ipad|macbook|watch|айфон|самсунг|ксиоми|редми", re.I)
 
@@ -39,7 +46,7 @@ def parse_listing_text(text: str, source_type: str = "ig") -> list[Product]:
         prices = []
         for m in _PRICE.finditer(line):
             v = parse_price(m.group(1))
-            if v and 1500 <= v <= 900000:
+            if v and 1500 <= v <= 2_000_000:     # верх с запасом (Mac Studio/Pro)
                 prices.append((m.start(), v))
         if not prices:
             if _BRAND.search(line):            # строка-заголовок (бренд, без цены)

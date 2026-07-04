@@ -79,7 +79,7 @@ def fetch_sr57(max_pages: int = 60, throttle: float = 0.5) -> list[Product]:
                 seen.add(c.url)
             out.extend(fresh)
             time.sleep(throttle)
-            if not cards or not fresh or 'rel="next"' not in html:
+            if not cards or not fresh or not re.search(r'rel=["\']?next', html):
                 break
     print(f"[sr57] собрано {len(out)} товаров")
     return out

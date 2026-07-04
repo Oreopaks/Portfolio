@@ -2,3 +2,12 @@
 telethon>=1.34      # mvp4_scout: чтение Telegram-каналов (нужны api_id/api_hash)
 fastembed>=0.3      # mvp3_rag: плотные RU-эмбеддинги (ONNX, без torch). RAG_BACKEND=dense.
                     # Без него RAG падает на TF-IDF (RAG_BACKEND=tfidf, офлайн-фолбэк).
+
+# --- mvp7_price_scout: парсер цен конкурентов + бот сравнения ---
+beautifulsoup4>=4.12  # парс статичных сайтов конкурентов (di-park, sr57, repremium, ispace, iprice)
+rapidfuzz>=3          # fuzzy-сопоставление названий товаров к каталогу di-park
+openpyxl>=3.1         # выгрузка сравнения в .xlsx (/export)
+# Тяжёлые (ставить только под боевой сбор Яндекс/Instagram):
+playwright>=1.44      # mvp7: Яндекс-профили (цены за JS-вкладкой). + `playwright install chromium`
+instagrapi>=2.0       # mvp7: Instagram с сессией (посты/stories/highlights)
+easyocr>=1.7          # mvp7: OCR цен на фото и кадрах stories (тянет torch — крупный)

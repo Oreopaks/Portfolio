@@ -32,6 +32,9 @@ _SKIP_URL = re.compile(r"demo|vitrin|_b_u_|/bu_|ustal|obmen", re.I)  # витр�
 def parse_repremium(html: str) -> list[Product]:
     """Отрендеренный HTML категории repremium -> [Product]. Без сети."""
     soup = BeautifulSoup(html or "", "html.parser")
+    # зачёркнутые/старые цены — вон, иначе parse_price возьмёт старую первой
+    for bad in soup.select("del, s, [class*=old-price], [class*=price-old], [class*=oldprice], [class*=discount]"):
+        bad.decompose()
     out: list[Product] = []
     for card in soup.select(".catalog-card2"):
         title_el = (card.select_one(".homepage2-products-slide__title")
@@ -88,38 +91,70 @@ def _fetch_static(url: str) -> tuple[str, str | None]:
         return url, None
 
 
+_MAX_PAGES = 8      # страниц PAGEN_1 на категорию (по 60 карточек — с запасом)
+
+
+def _fetch_category(cat: str) -> tuple[str, list[Product], bool]:
+    """Категория со ВСЕЙ пагинацией Bitrix (?PAGEN_1=N) -> (url, товары, нужен_рендер).
+
+    Пагинация обязательна: листовые категории отдают 60 карточек на страницу,
+    страницы 2+ иначе молча выпадают из сравнения. Конец: страница без новых
+    товаров (Bitrix повторяет последнюю) или без ссылки на следующую.
+    """
+    first = f"{BASE}{cat}?shop_id={SHOP_ID}"
+    items: list[Product] = []
+    seen: set[str] = set()
+    for n in range(1, _MAX_PAGES + 1):
+        url = first if n == 1 else f"{first}&PAGEN_1={n}"
+        _, html = _fetch_static(url)
+        if html is None or "catalog-card2" not in html:
+            return first, items, n == 1          # грид не пришёл статикой на 1-й странице
+        new = [c for c in parse_repremium(html) if c.url and c.url not in seen]
+        if not new:
+            break
+        for c in new:
+            seen.add(c.url)
+        items += new
+        if f"PAGEN_1={n + 1}" not in html:       # ссылки «дальше» нет — конец
+            break
+    return first, items, False
+
+
 def fetch_repremium(max_cats: int = 60, workers: int = 10) -> list[Product]:
-    """Боевая: телефонные категории repremium -> [Product]. Дедуп по url.
+    """Боевая: телефонные категории repremium (с пагинацией) -> [Product]. Дедуп по url.
 
     Сначала параллельно статикой (грид server-rendered). Страницы без грида
     (html не пришёл / нет .catalog-card2) добиваем Playwright-рендером — редкость.
     """
-    cats = _leaf_categories()[:max_cats]
+    all_cats = _leaf_categories()
+    cats = all_cats[:max_cats]
+    if len(all_cats) > max_cats:                 # молчаливое усечение = дыра в охвате
+        print(f"[repremium] ВНИМАНИЕ: категорий {len(all_cats)} > max_cats={max_cats}, "
+              f"выпадают: {', '.join(all_cats[max_cats:])}")
     if not cats:
         return []
-    urls = [f"{BASE}{cat}?shop_id={SHOP_ID}" for cat in cats]
     seen: set[str] = set()
     out: list[Product] = []
     need_render: list[str] = []
 
-    def _take(html: str) -> None:
-        for c in parse_repremium(html):
+    def _take(prods: list[Product]) -> None:
+        for c in prods:
             if c.url and c.url not in seen:
                 seen.add(c.url)
                 out.append(c)
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        for url, html in ex.map(_fetch_static, urls):
-            if html is None or "catalog-card2" not in html:   # грид не пришёл статикой
+        for url, items, render in ex.map(_fetch_category, cats):
+            if render:
                 need_render.append(url)
             else:
-                _take(html)
+                _take(items)
 
     if need_render:                                            # фолбэк через браузер
         with Browser() as br:
             for url in need_render:
                 try:
-                    _take(br.render(url, wait_selector=".catalog-card2"))
+                    _take(parse_repremium(br.render(url, wait_selector=".catalog-card2")))
                 except Exception as e:
                     print(f"[repremium] render {url}: {e}")
 

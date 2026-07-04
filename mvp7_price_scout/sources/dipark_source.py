@@ -35,6 +35,10 @@ _NON_CATALOG = {
 def parse_dipark(html: str) -> list[Product]:
     """HTML листинга категории -> список товаров (source_type='base'). Без сети."""
     soup = BeautifulSoup(html or "", "html.parser")
+    # зачёркнутые/старые цены — вон ДО извлечения, иначе parse_price возьмёт
+    # первое число (= старую цену) при появлении акционной разметки
+    for bad in soup.select("del, s, [class*=old-price], [class*=price-old], [class*=oldprice], [class*=discount]"):
+        bad.decompose()
     out: list[Product] = []
     for art in soup.select("article.offer-card"):
         a = art.select_one("a.offer-card__title")
@@ -93,7 +97,7 @@ def _fetch_category(cat: str, max_pages: int, throttle: float) -> list[Product]:
             local_seen.add(c.url)
         items.extend(fresh)
         time.sleep(throttle)
-        if not cards or not fresh or 'rel="next"' not in html:
+        if not cards or not fresh or not re.search(r'rel=["\']?next', html):
             break
     return items
 
