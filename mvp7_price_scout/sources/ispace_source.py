@@ -11,6 +11,7 @@ parse_offer(html, url) — чистая. fetch_ispace(...) — боевая.
 """
 from __future__ import annotations
 
+import random
 import re
 import time
 
@@ -92,11 +93,16 @@ def _phone_offer_urls() -> list[str]:
     return sorted(urls, key=lambda u: (_priority(u), u))
 
 
-def fetch_ispace(max_products: int = 300, throttle: float = 0.3) -> list[Product]:
+def fetch_ispace(max_products: int = 200, throttle: float = 1.0,
+                 breaker: int = 25) -> list[Product]:
     """Боевая: телефонные страницы товаров из sitemap -> имя+цена -> [Product].
 
-    ВНИМАНИЕ: ispace отдаёт 503 на параллельные запросы (жёсткий rate-limit),
-    поэтому строго последовательно с throttle — иначе теряем страницы.
+    ВНИМАНИЕ: ispace ЖЁСТКО rate-лимитит по IP — при частых запросах отдаёт 503
+    почти на всё. Поэтому: (1) медленный throttle ~1с + джиттер, чтобы не триггерить
+    лимит; (2) tries=1 — НЕ ретраим 503 (ретрай только добивает забаненный IP и
+    растягивает прогон); (3) circuit breaker — при `breaker` отказах ПОДРЯД считаем
+    IP флагнутым и обрываем сбор (дальнейший долбёж только продлевает бан). Покрытие
+    частичное — сайт сам ограничивает; доберём в следующем прогоне, когда IP остынет.
     """
     urls = _phone_offer_urls()
     if not urls:
@@ -105,23 +111,29 @@ def fetch_ispace(max_products: int = 300, throttle: float = 0.3) -> list[Product
         print(f"[ispace] телефонных страниц {len(urls)}, беру первые {max_products}")
         urls = urls[:max_products]
     out: list[Product] = []
-    for url in urls:
+    blocked = 0
+    for i, url in enumerate(urls, 1):
         try:
-            r = http.get(url, timeout=25)
+            r = http.get(url, timeout=25, tries=1)      # без ретрая — 503-сайт не добиваем
         except Exception as e:
             print(f"[ispace] {url}: {e}")
-            continue
-        # модель-URL (/offers/apple_iphone_15/) редиректит на конкретный SKU
-        # (…_512gb_black_esim) — это ЖИВОЙ товар с ценой, оставляем. Снятый товар
-        # редиректит на ЛИСТИНГ (/catalog/…) — его отсекаем: если после редиректа
-        # ушли НЕ на /offers/, пропускаем (иначе цена тайла листинга липнет к
-        # неверному товару). Раньше резались ВСЕ редиректы -> терялись новые
-        # модели, в базе оставалось ~6 товаров.
-        if r.status_code != 200 or "/offers/" not in r.url:
-            continue
-        p = parse_offer(r.text, r.url)          # r.url — итоговый SKU-URL (для slug-имени)
-        if p and p.price:
-            out.append(p)
-        time.sleep(throttle)
+            blocked += 1
+        else:
+            # модель-URL (/offers/apple_iphone_15/) редиректит на конкретный SKU
+            # (…_512gb_black_esim) — живой товар, оставляем. Снятый товар редиректит
+            # на ЛИСТИНГ (/catalog/…) — отсекаем (иначе цена тайла липнет к чужому
+            # товару). Раньше резались ВСЕ редиректы -> в базе оставалось ~6 товаров.
+            if r.status_code == 200 and "/offers/" in r.url:
+                blocked = 0
+                p = parse_offer(r.text, r.url)          # r.url — итоговый SKU-URL (slug-имя)
+                if p and p.price:
+                    out.append(p)
+            else:
+                blocked += 1                            # 503 / снятый / редирект-на-листинг
+        if blocked >= breaker:
+            print(f"[ispace] {blocked} отказов подряд (rate-limit) — обрываю на {i}/{len(urls)}, "
+                  f"собрано {len(out)}. IP остынет — доберём в следующем прогоне.")
+            break
+        time.sleep(throttle + random.uniform(0, 0.5))   # джиттер против паттерн-детекта
     print(f"[ispace] собрано {len(out)} товаров (из {len(urls)} страниц)")
     return out

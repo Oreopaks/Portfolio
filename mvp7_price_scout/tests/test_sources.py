@@ -1,4 +1,6 @@
 """Тесты чистых HTML-парсеров источников (без сети): sr57, iprice, kingstore, repremium, mobilax."""
+from mvp7_price_scout.normalize import Product
+from mvp7_price_scout.sources import ispace_source
 from mvp7_price_scout.sources.iprice_source import parse_iprice
 from mvp7_price_scout.sources.ispace_source import parse_offer as parse_ispace_offer
 from mvp7_price_scout.sources.kingstore_source import parse_kingstore
@@ -199,6 +201,49 @@ def test_parse_ispace_offer_uses_total_price_not_populars():
     assert p.price == 75890                     # good__total-price, НЕ 4 490 из «популярное»
     assert "iphone 15" in p.title.lower() and p.storage == "512gb"
     assert parse_ispace_offer("", "") is None   # пустой HTML -> None (без падения)
+
+
+def test_fetch_ispace_circuit_breaker(monkeypatch):
+    """503-флуд (rate-limit) обрывается circuit breaker'ом, а не долбит все 200 URL."""
+    monkeypatch.setattr(ispace_source, "_phone_offer_urls",
+                        lambda: [f"{ispace_source.BASE}/offers/x{n}/" for n in range(200)])
+    monkeypatch.setattr(ispace_source.time, "sleep", lambda *a: None)
+    calls = {"n": 0}
+
+    class _R503:
+        status_code = 503
+        url = ispace_source.BASE + "/offers/x/"
+        text = ""
+
+    def fake_get(*a, **k):
+        calls["n"] += 1
+        return _R503()
+
+    monkeypatch.setattr(ispace_source.http, "get", fake_get)
+    out = ispace_source.fetch_ispace(max_products=200, throttle=0, breaker=25)
+    assert out == [] and calls["n"] <= 26          # обрыв после ~25, не 200 запросов
+
+
+def test_fetch_ispace_breaker_resets_on_success(monkeypatch):
+    """Периодический успех сбрасывает счётчик — на живом сайте сбор не обрывается."""
+    urls = [f"{ispace_source.BASE}/offers/x{n}/" for n in range(60)]
+    monkeypatch.setattr(ispace_source, "_phone_offer_urls", lambda: urls)
+    monkeypatch.setattr(ispace_source.time, "sleep", lambda *a: None)
+    monkeypatch.setattr(ispace_source, "parse_offer",
+                        lambda html, url: Product(shop="ispace", title="iPhone 15 256Gb", price=70000))
+
+    class _OK:
+        status_code = 200
+        text = "<html></html>"
+
+    def fake_get(url, **k):
+        r = _OK()
+        r.url = url                                # /offers/ сохранён -> успех
+        return r
+
+    monkeypatch.setattr(ispace_source.http, "get", fake_get)
+    out = ispace_source.fetch_ispace(max_products=60, throttle=0, breaker=25)
+    assert len(out) == 60                          # все живые -> собрано всё, без обрыва
 
 
 def test_parse_empty_html_no_crash():
