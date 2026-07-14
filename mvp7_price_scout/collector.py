@@ -61,6 +61,21 @@ HEAVY_SOURCES: list[tuple[str, callable]] = [
 RUN_EVERY_HOURS = 3
 STALE_HOURS = 8
 
+# Тихие часы: ценовые алерты ночью не шлём (владельца не будим). Health (источник
+# отвалился) шлём всегда — это уже поломка. ponytail: ночное изменение цены при
+# следующем дневном прогоне может не всплыть (сравнение идёт с ночным срезом) —
+# приемлемый потолок для MVP; апгрейд — буфер отложенной доставки до утра.
+QUIET_START, QUIET_END = 23, 8
+
+# Флаг-дедуп «сбор di-park подозрительно мал»: пока сайт лежит, не долбить одним
+# и тем же алертом каждые 3 часа. Сбрасывается при первом же удачном сборе.
+_DIPARK_LOW_MARKER = Path(__file__).resolve().parent / ".dipark_low"
+
+
+def _quiet_now() -> bool:
+    h = datetime.now().hour
+    return h >= QUIET_START or h < QUIET_END
+
 
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
@@ -97,10 +112,15 @@ def collect_base(conn) -> list[dict]:
     old_n = conn.execute(
         "SELECT COUNT(*) FROM products WHERE source_type = 'base'").fetchone()[0]
     if old_n >= 50 and len(prods) < old_n * 0.5:
-        notify.send_admins(
-            f"🚨 <b>Сбор di-park подозрительно мал</b>: {len(prods)} товаров "
-            f"(было {old_n}). Каталог не тронут, прогон отменён — см. collector.log.")
-        raise RuntimeError(f"di-park вернул {len(prods)} < 50% от {old_n} — эталон не обновляю")
+        if not _DIPARK_LOW_MARKER.exists():         # дедуп: один алерт на затяжную поломку
+            notify.send_admins(
+                f"🚨 <b>Сбор di-park подозрительно мал</b>: {len(prods)} товаров "
+                f"(было {old_n}). Каталог не тронут, прогон отменён — см. collector.log.")
+            _DIPARK_LOW_MARKER.touch()
+        exc = RuntimeError(f"di-park вернул {len(prods)} < 50% от {old_n} — эталон не обновляю")
+        exc.notified = True                         # run() не шлёт второй алерт про этот отказ
+        raise exc
+    _DIPARK_LOW_MARKER.unlink(missing_ok=True)      # сбор восстановился — сброс дедупа
     for p in prods:
         p.source_type = "base"
     _stamp(prods)
@@ -133,6 +153,9 @@ def run(heavy: bool = False, db: str | None = None) -> None:
     except Exception as e:      # эталон не собрался — работаем на старых данных
         store.progress_mark(conn, "di-park", "fail")
         store.progress_finish(conn, _now())
+        if not getattr(e, "notified", False):   # полный отказ (сайт лёг) — не немо в лог
+            notify.send_admins(f"🚨 <b>di-park (эталон) не собрался</b>: {e}\n"
+                               "Работаю на старых ценах — конкуренты не пересчитаны.")
         print(f"[collector] эталон di-park упал, прогон отменён: {e}")
         conn.close()
         return
@@ -151,9 +174,11 @@ def run(heavy: bool = False, db: str | None = None) -> None:
     try:
         msgs = alerts.compute_alerts(conn, run_ts)
         store.append_price_log(conn, all_comp, run_ts)
-        if msgs:
+        if msgs and not _quiet_now():
             notify.send_admins("⚠️ <b>Изменения у конкурентов</b>\n\n" + "\n\n".join(msgs))
             print(f"[collector] алертов: {len(msgs)}")
+        elif msgs:
+            print(f"[collector] {len(msgs)} ценовых алертов подавлены (тихие часы)")
     except Exception as e:
         print(f"[collector] алерты упали: {e}")
 

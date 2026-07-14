@@ -91,7 +91,10 @@ def _fetch_static(url: str) -> tuple[str, str | None]:
         return url, None
 
 
-_MAX_PAGES = 8      # страниц PAGEN_1 на категорию (по 60 карточек — с запасом)
+_MAX_PAGES = 8      # страниц на категорию (по 60 карточек — с запасом)
+# Bitrix-грид листается компонентом-пейджером №7 (?PAGEN_7=N). PAGEN_1..6/8 сайт
+# игнорирует — отдаёт 1-ю страницу (проверено живьём на apple/smartfony хабах).
+_PAGER = "PAGEN_7"
 
 
 def _fetch_category(cat: str) -> tuple[str, list[Product], bool]:
@@ -105,7 +108,7 @@ def _fetch_category(cat: str) -> tuple[str, list[Product], bool]:
     items: list[Product] = []
     seen: set[str] = set()
     for n in range(1, _MAX_PAGES + 1):
-        url = first if n == 1 else f"{first}&PAGEN_1={n}"
+        url = first if n == 1 else f"{first}&{_PAGER}={n}"
         _, html = _fetch_static(url)
         if html is None or "catalog-card2" not in html:
             return first, items, n == 1          # грид не пришёл статикой на 1-й странице
@@ -115,7 +118,7 @@ def _fetch_category(cat: str) -> tuple[str, list[Product], bool]:
         for c in new:
             seen.add(c.url)
         items += new
-        if f"PAGEN_1={n + 1}" not in html:       # ссылки «дальше» нет — конец
+        if f"{_PAGER}={n + 1}" not in html:      # ссылки «дальше» нет — конец
             break
     return first, items, False
 

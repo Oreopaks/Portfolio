@@ -46,7 +46,7 @@ HELP = (
     "<code>airpods pro 2</code>\n"
     "• /top — где мы дороже всех (теряем продажи)\n"
     "• /stats — наша позиция на рынке одним взглядом\n"
-    "• /export — выгрузить всё сравнение в Excel/CSV\n"
+    "• /export — выгрузить всё сравнение в Excel/CSV (только админ)\n"
     "• /refresh — обновить цены конкурентов (только админ)\n"
     "• /status — прогресс обновления цен"
 )
@@ -87,10 +87,23 @@ def fmt_ago(iso: str | None) -> str:
 def _label(shop: str, source_type: str) -> str:
     base = SHOP_LABEL.get(shop, shop)
     if source_type == "yandex":
-        return base + "🅈"
+        return base + " 🅈"
     if source_type in ("ig", "ig_ocr"):
-        return base + "📷"
+        return base + " 📷"
     return base
+
+
+def _stale_note(iso: str | None) -> str:
+    """⚠️ если срез старше суток — вердикт по нему ненадёжен (источник мог отвалиться)."""
+    if not iso:
+        return ""
+    try:
+        dt = datetime.fromisoformat(iso)
+    except ValueError:
+        return ""
+    if (datetime.now() - dt).total_seconds() > 86400:
+        return "\n⚠️ Данные старше суток — цены могли устареть, сверь перед решением."
+    return ""
 
 
 def _short_title(title: str) -> str:
@@ -207,6 +220,15 @@ def _fam_label(title: str) -> str:
     return re.sub(r"\s+", " ", t).strip()
 
 
+def _deglue(q: str) -> str:
+    """Расклеить границы буква↔цифра: «iphone17promax» -> «iphone 17 promax».
+
+    Слитный ввод без пробелов даёт 0 кандидатов LIKE (каталог хранит с пробелами)
+    и тупик «не нашёл» — эвристика-фолбэк перед тем, как сдаться.
+    """
+    return re.sub(r"(?<=[a-zа-яё])(?=\d)|(?<=\d)(?=[a-zа-яё])", " ", q.lower())
+
+
 def search_suggestions(conn, query: str, limit: int = 8, min_score: int = 45) -> list[dict]:
     """Ранжированные подсказки-СЕМЬИ (модель+объём) под свободный запрос.
 
@@ -308,6 +330,7 @@ def render_comparison(conn, base_row: dict) -> str:
     """Понятная карточка владельцу: вердикт + кто дешевле/дороже тебя + что сделать."""
     our = base_row["price"]
     comps = _dedup_comps(store.competitors_for(conn, base_row))
+    tracked = store.tracked_shop_count(conn)
     sim_tag = _SIM_TAG.get(sim_type_of(base_row["title"]), "")
     lines = [f"📱 {_esc(_short_title(base_row['title']))}{sim_tag}"]
     lines.append(f"💰 Твоя цена: {fmt_int(our)} ₽" if our else "💰 Твоя цена: под заказ")
@@ -319,6 +342,7 @@ def render_comparison(conn, base_row: dict) -> str:
     flagged = sorted([c for c in comps if c["price"] is not None and not c.get("sim_ok", True)],
                      key=lambda c: c["price"])
     missing = [c for c in comps if c["price"] is None]
+    n = len(priced)
 
     def flagged_lines() -> list[str]:
         if not flagged:
@@ -329,13 +353,30 @@ def render_comparison(conn, base_row: dict) -> str:
                 for c in flagged]
         return out
 
+    def floor_advice() -> str:
+        """Ориентир «Поставь X» по ВАЛИДНЫМ конкурентам без OCR-цен (нужна сверка).
+
+        Немаркированный eSIM-конкурент сюда не попадёт: отфильтрован в priced
+        (sim_ok=False) — корень бага «поставь 94 890 ₽». Копеечный аксессуар
+        пропускаем: «Поставь 1 ₽» абсурден (floor − 100 ушёл бы в 0/минус).
+        """
+        f = next((c for c in priced if c["source_type"] != "ig_ocr"), None)
+        if not f or f["price"] <= 100:
+            return ""
+        return f"\n🎯 Поставь {fmt_int(f['price'] - 100)} ₽ → станешь дешевле всех"
+
     if not priced:
-        lines.append("\nКонкурентов с этим товаром не нашёл.")
+        lines.append("\nКонкурентов с ценой на этот товар пока нет.")
+        lines.append(f"Отслеживаю {tracked} магазинов — у этой позиции цену не дал ни один "
+                     "(нет в наличии или магазин не отдал цену).")
         lines += flagged_lines()
         if missing:
-            lines.append("◽ есть, но без цены: " + ", ".join(
+            lines.append("◽ есть в наличии, но без цены: " + ", ".join(
                 sorted({_label(c["shop"], c["source_type"]) for c in missing})))
         lines.append(f"🕒 {fmt_ago(base_row.get('fetched_at'))}")
+        stale = _stale_note(base_row.get("fetched_at"))
+        if stale:
+            lines.append(stale.lstrip("\n"))
         return "\n".join(lines)
 
     def row(c: dict, sign: str) -> str:
@@ -350,10 +391,16 @@ def render_comparison(conn, base_row: dict) -> str:
         lines.append("")
         if not cheaper:
             lines.append("🟢 Дешевле тебя никого нет — ты в топе 👍")
-        elif len(cheaper) == len(priced):
-            lines.append("🔴 Ты дороже ВСЕХ — здесь теряешь покупателей")
+        elif len(cheaper) == n:
+            # «ВСЕХ» звучит как «весь рынок» — при 1-2 конкурентах называем число честно
+            if n == 1:
+                lines.append("🔴 Дороже единственного конкурента с ценой — проверь позицию")
+            elif n == 2:
+                lines.append("🔴 Дороже обоих конкурентов с ценой")
+            else:
+                lines.append(f"🔴 Ты дороже ВСЕХ ({n}) — здесь теряешь покупателей")
         else:
-            lines.append(f"🟡 Тебя обходят по цене: {len(cheaper)} из {len(priced)}")
+            lines.append(f"🟡 Тебя обходят по цене: {len(cheaper)} из {n}")
         if cheaper:
             lines.append(f"\n🔴 Дешевле тебя ({len(cheaper)}):")
             lines += [row(c, "−") for c in cheaper]
@@ -364,22 +411,30 @@ def render_comparison(conn, base_row: dict) -> str:
             lines.append(f"\n🟢 Дороже тебя ({len(pricier)}):")
             lines += [row(c, "+") for c in pricier]
         if cheaper:
-            # ориентир «Поставь» — только по ВАЛИДНЫМ (тип SIM совпал) и без OCR-цен
-            # (нужна сверка). Немаркированный eSIM-конкурент сюда уже не попадёт: он
-            # отфильтрован в priced (sim_ok=False) — корень бага «поставь 94 890 ₽».
-            floor = next((c for c in priced if c["source_type"] != "ig_ocr"), None)
-            if floor:
-                lines.append(f"\n🎯 Поставь {fmt_int(floor['price'] - 100)} ₽ → станешь дешевле всех")
+            adv = floor_advice()
+            if adv:
+                lines.append(adv)
     else:
         lines.append("\nЦены конкурентов:")
         lines += [row(c, "") for c in priced]
+        adv = floor_advice()      # «под заказ» тоже нуждается в ориентире, куда целиться
+        if adv:
+            lines.append(adv)
 
     lines += flagged_lines()
     if missing:
         lines.append("◽ без цены: " + ", ".join(
             sorted({_label(c["shop"], c["source_type"]) for c in missing})))
+    if n < tracked:
+        lines.append(f"\nℹ️ Сравнил с {n} из {tracked} отслеживаемых магазинов "
+                     "(у остальных этого товара нет).")
+    if any(c["source_type"] == "ig_ocr" for c in priced):
+        lines.append("~ — цена распознана с фото (Instagram), сверь вручную.")
     newest = max((c.get("fetched_at") or "" for c in comps), default="")
     lines.append(f"🕒 обновлено {fmt_ago(newest)}")
+    stale = _stale_note(newest)
+    if stale:
+        lines.append(stale.lstrip("\n"))
     return "\n".join(lines)
 
 
@@ -642,18 +697,27 @@ def handle_text(conn, text: str, is_admin: bool) -> Reply:
     if len(low) < 2:
         return Reply("Напиши название товара, например: <code>iphone 17 256</code>")
 
-    sugg = search_suggestions(conn, text)
+    limit = 8
+    sugg = search_suggestions(conn, text, limit=limit)
+    hint = ""
+    if not sugg:                                # слитный ввод «iphone17promax» -> расклеить и повторить
+        deglued = _deglue(text)
+        if deglued != text.lower():
+            sugg = search_suggestions(conn, deglued, limit=limit)
+            if sugg:
+                hint = "Точного совпадения нет, вот ближайшее:\n"
     if not sugg:
         return Reply(f"Не нашёл «{_esc(text)}» в каталоге Di-Park.\n"
                      "Попробуй короче: модель + объём, напр. <code>iphone 16 pro 256</code>.")
     # объём указан (или семья одна) -> сразу карточка нужного цвета; иначе список подсказок
     # (объём — ось, которую чаще всего недописывают: «17 pro» -> выбор 128/256/512)
-    if len(sugg) == 1 or _query_has_storage(conn, text):
+    if not hint and (len(sugg) == 1 or _query_has_storage(conn, text)):
         product = find_product(conn, text) or store.base_by_id(conn, sugg[0]["id"])
         if product:
             return _product_reply(conn, product)
     buttons = [(s["label"], f"p:{s['id']}") for s in sugg]
-    return Reply(f"Уточни, что именно (нашёл {len(sugg)} под «{_esc(text)}»):", buttons)
+    tail = " (показаны 8 ближайших — уточни модель/объём)" if len(sugg) == limit else ""
+    return Reply(f"{hint}Уточни, что именно (нашёл {len(sugg)} под «{_esc(text)}»):{tail}", buttons)
 
 
 def handle_callback(conn, data: str) -> Reply | None:

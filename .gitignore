@@ -19,3 +19,5 @@ mvp7_price_scout/prices.db
 mvp7_price_scout/prices.db-wal
 mvp7_price_scout/prices.db-shm
 mvp7_price_scout/ig_session.json
+mvp7_price_scout/.bot_offset
+mvp7_price_scout/.dipark_low

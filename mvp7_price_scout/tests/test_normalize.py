@@ -22,6 +22,12 @@ def test_same_phone_across_shops_same_key():
     assert "256gb" in a and "iphone" in a and "17" in a
 
 
+def test_ps5_alias_expands_to_playstation():
+    """«PS5» == «PlayStation 5» (di-park зовёт консоль полным именем, магазины — «PS5»)."""
+    assert model_key("Sony PS5 Slim 1TB") == model_key("Sony PlayStation 5 Slim 1TB")
+    assert "playstation" in model_key("PS5 Diablo 4")
+
+
 def test_storage_distinguishes_variants():
     """256 и 512 — разные товары, ключи не совпадают."""
     assert model_key("iPhone 17 256GB") != model_key("iPhone 17 512GB")
@@ -137,6 +143,12 @@ def test_is_special_edition():
     assert is_special_edition("Xiaomi 14 Ultra Limited")
     assert not is_special_edition("Apple iPhone 17 Pro 256Gb Deep Blue (Sim+E-Sim)")
     assert not is_special_edition("Samsung Galaxy S25 256Gb Navy")
+    # «...Edition» — часть штатного имени SKU (игры, приставки), НЕ признак редкости:
+    # флагаем только по реальным маркерам (Iron Man/Limited/...), иначе теряли ~44 тов./прогон
+    assert not is_special_edition("Игровая консоль Sony PlayStation 5 Pro 2TB Digital Edition")
+    assert not is_special_edition("PS5 Alan Wake 2 Deluxe Edition")
+    assert not is_special_edition("GTA VI Ultimate Edition")
+    assert not is_special_edition("Мышь Xiaomi Mouse Comfort Edition White")
 
 
 def test_parse_price():
@@ -220,6 +232,9 @@ def test_used_detects_rfb_copy_showcase():
     assert is_used("EarPods Type-C (Люкс копия)")
     assert is_used("Смартфон витринный экземпляр")
     assert is_used("iPhone 14 128Gb Новый Актив")
+    assert is_used("iPhone 13 128Gb Б/У АКБ 89%")            # процент у батареи = Б/У
+    assert not is_used("Кофе в зернах Mikale 100% Arabica 1кг")  # голый % — не Б/У
+    assert not is_used("Коллекция 100% натуральных масел Антистресс")
 
 
 def test_lte_is_separate_variant():

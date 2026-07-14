@@ -159,13 +159,22 @@ def base_catalog(conn: sqlite3.Connection) -> list[dict]:
     return [dict(r) for r in cur.fetchall()]
 
 
+def tracked_shop_count(conn: sqlite3.Connection) -> int:
+    """Сколько магазинов-конкурентов сейчас в базе — для карточки «сравнил с N из M»."""
+    return conn.execute(
+        "SELECT COUNT(DISTINCT shop) FROM products WHERE source_type != 'base'"
+    ).fetchone()[0]
+
+
 def search_base(conn: sqlite3.Connection, query_key: str, limit: int = 40) -> list[dict]:
     """Кандидаты из каталога эталона по словам ключа (LIKE) — добивает fuzzy в caller.
 
     Возвращает строки base, у которых model_key/title содержит хотя бы одно
     значимое слово запроса. Узкий префильтр перед дорогим rapidfuzz.
     """
-    words = [w for w in query_key.split() if len(w) >= 2]
+    # ponytail: кап 24 значимых слова — очень длинный запрос иначе строит LIKE на
+    # сотни термов, и SQLite падает «Expression tree too large (max depth 1000)».
+    words = [w for w in query_key.split() if len(w) >= 2][:24]
     if not words:
         cur = conn.execute(
             "SELECT id, title, model_key, storage, price, url, fetched_at "

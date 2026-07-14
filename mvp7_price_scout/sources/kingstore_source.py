@@ -7,7 +7,8 @@ Apple-магазин. Каждая карточка листинга несёт 
        data-product-price="62990" data-category="iphone" data-id="4971">
 Парсим их напрямую — надёжнее текста (цена уже целое, без «от/руб»).
 Категории-хабы /catalog/<раздел>/ берём со страницы /catalog/. Пагинация
-?PAGEN_1=N; стоп при отсутствии новых data-id (дедуп).
+?PAGEN_2=N (PAGEN_1 сайт игнорирует — отдаёт ту же 1-ю страницу); стоп при
+отсутствии новых data-id (дедуп).
 
 parse_kingstore(html) — чистая. fetch_kingstore(...) — боевая.
 """
@@ -71,7 +72,7 @@ def fetch_kingstore(max_pages: int = 30, throttle: float = 0.4) -> list[Product]
     out: list[Product] = []
     for hub in hubs:
         for p in range(1, max_pages + 1):
-            url = f"{BASE}{hub}" + (f"?PAGEN_1={p}" if p > 1 else "")
+            url = f"{BASE}{hub}" + (f"?PAGEN_2={p}" if p > 1 else "")
             try:
                 r = http.get(url, timeout=40)
             except Exception as e:

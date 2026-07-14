@@ -21,7 +21,9 @@ BASE = "https://iprice.store"
 SHOP = "iprice"
 
 _TARGET = re.compile(r"smart|iphone|apple|samsung|xiaomi|redmi|poco|honor|realme|"
-                     r"telefon|smartfon|huawei|vivo|oppo|tecno|nothing|googl|pixel", re.I)
+                     r"telefon|smartfon|huawei|vivo|oppo|tecno|nothing|googl|pixel|"
+                     # di-park сравнивает и эти категории — иначе наушники/AirPods/iPad/Mac/часы не парсились
+                     r"airpods|naushnik|ipad|planshet|mac|noutbuk|watch|chas", re.I)
 
 
 def parse_iprice(html: str) -> list[Product]:
