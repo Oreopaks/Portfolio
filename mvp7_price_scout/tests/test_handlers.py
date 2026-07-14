@@ -193,7 +193,9 @@ def test_find_product_respects_sim_type(tmp_path):
     conn = _seed_sim_variants(tmp_path)
     assert handlers.find_product(conn, "17 pro 256 sim+esim")["price"] == 99990
     assert handlers.find_product(conn, "17 pro 256 esim")["price"] == 89490
-    assert handlers.find_product(conn, "17 pro 256")["price"] == 89490   # SIM не указан — дешёвый
+    # SIM не указан -> ФИЗИЧЕСКАЯ версия (Sim+E-Sim), не дешёвый eSIM: владелец в РФ
+    # продаёт физику, дефолт-eSIM занижал бы карточку и совет «Поставь» на ~10к
+    assert handlers.find_product(conn, "17 pro 256")["price"] == 99990
 
 
 def test_handle_text_sim_query_full_path(tmp_path):

@@ -201,6 +201,13 @@ def find_product(conn, query: str, min_score: int = 55) -> dict | None:
     qsim = sim_type_of(query)
     if qsim:                              # запрошен тип SIM — сужаем семью на него
         fam = [r for r in fam if sim_type_of(r["title"]) == qsim] or fam
+    else:
+        # SIM не указан -> по умолчанию ФИЗИЧЕСКАЯ версия (Sim+eSIM/2 SIM), не дешёвый
+        # eSIM-only: владелец продаёт физику, карточка/«Поставь» по eSIM-цене занижают
+        # рекомендацию на ~10к. eSIM достижим явным запросом «esim».
+        phys = [r for r in fam if sim_type_of(r["title"]) in ("sim_esim", "dual_sim")]
+        if phys:
+            fam = phys
     want = _query_colors(query, vocab)
     if want:
         picked = [r for r in fam if want & set((color_of(r["title"]) or "").split())]
@@ -362,6 +369,11 @@ def render_comparison(conn, base_row: dict) -> str:
         """
         f = next((c for c in priced if c["source_type"] != "ig_ocr"), None)
         if not f or f["price"] <= 100:
+            return ""
+        # НЕ советовать, если валидный (не-OCR) конкурент не дешевле нас: иначе при
+        # «дешевле» только по OCR-цене (Instagram) совет берёт дорогой сайт и толкает
+        # ПОДНЯТЬ цену под лозунгом «дешевле всех» — прямая потеря продаж.
+        if our is not None and f["price"] >= our:
             return ""
         return f"\n🎯 Поставь {fmt_int(f['price'] - 100)} ₽ → станешь дешевле всех"
 

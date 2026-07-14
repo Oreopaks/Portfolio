@@ -73,6 +73,22 @@ def test_reprice_hint_when_we_are_pricier(tmp_path):
     assert "🎯 Поставь 143 900 ₽ → станешь дешевле всех" in out
 
 
+def test_floor_advice_skips_when_only_ocr_cheaper(tmp_path):
+    """Если дешевле нас только OCR-цена (Instagram, ~), а не-OCR сайт дороже —
+    НЕ советовать «Поставь» (иначе совет толкает ПОДНЯТЬ цену под «дешевле всех»)."""
+    conn = store.connect(tmp_path / "p.db")
+    bid = _seed_base(conn, our=59990)
+    ocr = Product(shop="smart_room_57", title="iPhone 17 Pro Max 256", price=50000)
+    ocr.dipark_id = bid
+    ocr.source_type = "ig_ocr"
+    site = Product(shop="sr57", title="iPhone 17 Pro Max 256", price=65000)   # дороже нас
+    site.dipark_id = bid
+    store.replace_shop(conn, "smart_room_57", [ocr])
+    store.replace_shop(conn, "sr57", [site])
+    out = handlers.render_comparison(conn, store.base_by_id(conn, bid))
+    assert "🎯 Поставь" not in out       # не-OCR конкурент не дешевле — совета нет
+
+
 def test_export_xlsx(tmp_path):
     conn = store.connect(tmp_path / "p.db")
     bid = _seed_base(conn, our=150000)

@@ -191,11 +191,17 @@ def search_base(conn: sqlite3.Connection, query_key: str, limit: int = 40) -> li
     params: list[str] = []
     for w in words:
         params += [f"%{w}%", f"%{w}%"]
+    # tie-break по числу токенов model_key ASC (короче = ядро товара: «13 iphone
+    # 128gb», а не «стекло iphone 15 16 remax»). Без него одно-словный бренд-запрос
+    # («iphone»/«samsung») забивал пул сотнями дешёвых аксессуаров (одинаковый hits,
+    # price ASC), а реальные телефоны отсекались до fuzzy -> в подсказках 0 телефонов.
     cur = conn.execute(
         f"SELECT id, title, model_key, storage, price, url, fetched_at, "
         f"({hit_expr}) AS hits "
         f"FROM products WHERE source_type='base' AND ({clause}) "
-        f"ORDER BY hits DESC, (price IS NULL), price LIMIT ?",
+        f"ORDER BY hits DESC, "
+        f"(LENGTH(model_key) - LENGTH(REPLACE(model_key, ' ', ''))), "
+        f"(price IS NULL), price LIMIT ?",
         (*params, *params, limit * 4),
     )
     return [dict(r) for r in cur.fetchall()]
@@ -374,10 +380,15 @@ def previous_run_prices(conn: sqlite3.Connection, before_ts: str) -> dict[tuple[
     prev_ts = row["t"] if row else None
     if not prev_ts:
         return {}
+    # MIN по (dipark_id, shop): у магазина в прогоне несколько строк (цвета/варианты),
+    # а competitors_for/алерты сравнивают по МИНИМАЛЬНОЙ цене магазина. Без GROUP BY
+    # dict-comprehension брал произвольную (last-wins) цену -> асимметрия prev(любая)
+    # vs cur(min) фабриковала ложные «подрезы» на неизменных ценах.
     cur = conn.execute(
-        "SELECT dipark_id, shop, price FROM price_log WHERE run_ts = ?", (prev_ts,)
+        "SELECT dipark_id, shop, MIN(price) AS price FROM price_log "
+        "WHERE run_ts = ? AND price IS NOT NULL GROUP BY dipark_id, shop", (prev_ts,)
     )
-    return {(r["dipark_id"], r["shop"]): r["price"] for r in cur.fetchall() if r["price"] is not None}
+    return {(r["dipark_id"], r["shop"]): r["price"] for r in cur.fetchall()}
 
 
 def record_source_counts(conn: sqlite3.Connection, run_ts: str,
